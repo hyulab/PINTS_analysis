@@ -1,7 +1,7 @@
 #!/usr/bin/env python
-# -*- coding: utf-8 -*-
-# @Author: Li Yao
-# @Date: 3/13/21
+# coding=utf-8
+# Created by: Li Yao (ly349@cornell.edu)
+# Created on: 3/13/21
 import logging
 import argparse
 import os
@@ -10,7 +10,7 @@ import pybedtools
 import pandas as pd
 from pybedtools import BedTool
 from configparser import ConfigParser
-from file_parser_mem.bed import parse_bed
+from cornerstone.file_parser_mem.bed import parse_bed
 
 logging.basicConfig(format='%(name)s - %(asctime)s - %(levelname)s: %(message)s',
                     datefmt='%d-%b-%y %H:%M:%S',

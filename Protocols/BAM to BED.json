@@ -1,0 +1,13 @@
+{
+    "name": "BAM to BED",
+    "description": "This protocol converts bam files to bed format. The layout of each library needs to be assigned to the parameter {{Layout}}. Record in the bed file will be converted to the same directions as transcripts that they are derived from.",
+    "step": [
+        {
+            "software": "bam2bed.py",
+            "parameter": "--input-bams {{InputFile}} --layouts {{Layout}} --save-to {{Workspace}} --processes {{Processes||16}}",
+            "hash": "305e111f54dbbc0b95f94804764158cc",
+            "step_order": 1
+        }
+    ],
+    "reference": {}
+}

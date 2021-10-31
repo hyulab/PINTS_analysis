@@ -1,0 +1,30 @@
+{
+    "name": "ChIP-seq alignment",
+    "reference": {},
+    "step": [
+        {
+            "hash": "ffe0f465a45878f5b0efacd3c21dc342",
+            "parameter": "mem -t 16 {{BWT_INDEX}} -o {{JobName}}.sam {{InputFile}} ",
+            "software": "bwa",
+            "step_order": 1
+        },
+        {
+            "hash": "7fd53cebc763b848c3ea6a2a4bb469e2",
+            "parameter": "view -q 20 -bo {{JobName}}.bam -@ 16 {{JobName}}.sam",
+            "software": "samtools",
+            "step_order": 2
+        },
+        {
+            "hash": "8ed5c58c65189e674a7a8226f2434750",
+            "parameter": "sort -n -@ 16 -o {{JobName}}.nsort.bam {{JobName}}.bam",
+            "software": "samtools",
+            "step_order": 3
+        },
+        {
+            "hash": "7871bf6e078280caaeb0683445085c37",
+            "parameter": "sort -@ 16 -o {{JobName}}.sort.bam {{JobName}}.bam",
+            "software": "samtools",
+            "step_order": 4
+        }
+    ]
+}

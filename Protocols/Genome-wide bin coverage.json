@@ -1,0 +1,25 @@
+{
+    "name": "Genome-wide bin coverage",
+    "description": "This protocol generates a tab-separated file storing the coverage information across genome-wide bins (adjusted by {{BinSize}}). Input file(s) can be one or multiple bam file(s), the parameter {{Labels}} should be its/their corresponding name(s).",
+    "step": [
+        {
+            "software": "multiBamSummary",
+            "parameter": "bins --bamfiles {{InputFile}} -o {{JobName}}.npz --labels {{Labels}} --binSize {{BinSize}} --numberOfProcessors 16 --outRawCounts {{JobName}}.tab",
+            "hash": "26ab80e61a618f26dae1c14bbd30bd3c",
+            "step_order": 1
+        },
+        {
+            "software": "sed",
+            "parameter": "'s/#//g' {{JobName}}.tab | sed \"s/'//g\" | gzip > {{JobName}}.tab.gz",
+            "hash": "c159ce7e4c05d7270c8d1ba8fc56f9c8",
+            "step_order": 2
+        },
+        {
+            "software": "rm",
+            "parameter": "{{JobName}}.tab",
+            "hash": "e10e780fcb04809c21e4d1d0ca67b4dd",
+            "step_order": 3
+        }
+    ],
+    "reference": {}
+}

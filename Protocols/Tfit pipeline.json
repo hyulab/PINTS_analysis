@@ -1,0 +1,26 @@
+{
+    "name": "Tfit pipeline",
+    "reference": {
+        "WRAPPER_TFIT": "This wrapper will generate input files for Tfit. It takes three input parameters: 1. Input bam file 2. library layout, where can the script obtain the precise ends 3. prefix of the outputs And the outputs will be: 1. _full_plus.bedGraph: describing the coverage for forward strand 2. _full_minus.bedGraph: describing the coverage for reverse strand"
+    },
+    "step": [
+        {
+            "hash": "5db85f45ff6839c05b4cdda903a87697",
+            "parameter": "{{JobName}}_full_plus.bedGraph {{JobName}}_full_minus.bedGraph {{JobName}} {{TfitCommit||6197dad}}",
+            "software": "{{UserBin}}/Tfit_az_wrapper.sh",
+            "step_order": 2
+        },
+        {
+            "hash": "67804b84cb1f2473c9411ac03eb8a09f",
+            "parameter": "{{JobName}}_full_plus.bedGraph {{JobName}}_full_minus.bedGraph",
+            "software": "rm",
+            "step_order": 3
+        },
+        {
+            "hash": "9a95f319e224404eb570da4890400ef4",
+            "parameter": "{{WRAPPER_TFIT}} {{InputFile}} {{Layout||GROcap}} {{JobName}}",
+            "software": "bash",
+            "step_order": 1
+        }
+    ]
+}

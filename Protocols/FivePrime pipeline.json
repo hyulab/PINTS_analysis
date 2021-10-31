@@ -1,0 +1,47 @@
+{
+    "name": "FivePrime pipeline",
+    "reference": {
+        "GENERIC_PAIRING": "Generic pairing script for single TSSs",
+        "SmallPipeline": "SmallPipeline.sh from Nat Methods. 2018 Jul;15(7):505-511. doi: 10.1038/s41592-018-0014-2. This script can take up to 7 parameters: \r\n1. input bam \r\n2. output dir \r\n3. number of reads downsampling to \r\n4. clusters where the sum of the data values in the cluster is less than minValue will be omitted \r\n5. D, the \u2018density rise\u2019, a measure of the fold change between maximum and minimum read density, and an indicator of signal strength. [0, 10] \r\n6. P, the minimum number of positions within the peak covered by reads [0, 20] \r\n7. S, the total number of reads mapping to the region within the peak [0, 180]",
+        "WRAPPER_FIVEPRIME": "Wrapper script for FIVEPRIME, which will generate BAM files for FIVEPRIME.",
+        "getEnhancers": "getEnhancers.sh from Nat Methods. 2018 Jul;15(7):505-511. doi: 10.1038/s41592-018-0014-2. This script takes 7 parameters: \r\n1. CTSS file from SmmallPipeline.sh \r\n2. prefix for outputs \r\n3. name of the bam file used to produce the bed file \r\n4. number of bases soft mapped with Star \r\n5. number of bases at the 5' end of the reads not mapped to the genome (used for UMI, barcodes, etc)\r\n6. location of the fasta genome file \r\n7. direction score, elements with direction score equal to or higher than this value will be discarded"
+    },
+    "step": [
+        {
+            "hash": "4a924f1926fe629a2fdb25669626705f",
+            "parameter": "{{WRAPPER_FIVEPRIME}} {{InputFile}} {{Layout}} {{JobName}}",
+            "software": "bash",
+            "step_order": 1
+        },
+        {
+            "hash": "1f6d0a034bd64f641a6d6eb76302c012",
+            "parameter": "{{SmallPipeline}} {{JobName}}_SR.bam peakcalling {{MinVal||20}} {{MinDensityRise||7.2}} {{MinPosWithData||0}} {{MinSum||108}}",
+            "software": "bash",
+            "step_order": 2
+        },
+        {
+            "hash": "b6d345884631e6574446201fda52d41d",
+            "parameter": "{{getEnhancers}} peakcalling/paraclu.ctss {{JobName}} {{JobName}}_SR.bam {{Soft||0}} {{BarLen||0}} {{GENOME}} {{DirectionScore||0.8}} {{GENES}} {{EnableCapfilter||Yes}} > ge.log 2> ge.err",
+            "software": "bash",
+            "step_order": 4
+        },
+        {
+            "hash": "9d2545c703f7c0ea73fba4c7336b4d25",
+            "parameter": "'^chr' {{JobName}}.all_bidirectional.bed | grep -v \"{{Filters||U13369\\|chrM\\|Mycoplasma\\|EBV}}\" | grep -v _ > {{JobName}}_autosome.bed",
+            "software": "grep",
+            "step_order": 6
+        },
+        {
+            "hash": "479f46d0384f31db822ebe2a918d251e",
+            "parameter": "{{JobName}}.enhance.bed peakcalling/paraclu.paired.bed | sort -k1,1 -k2,2n | grep ^chr | grep -v \"chrM\\|EBV\\|_\" | awk 'BEGIN{OFS=\"\\t\";FS=\"\\t\"}{print $1,$2,$3}' | bedtools merge -i stdin > {{JobName}}.all_bidirectional.bed",
+            "software": "cat",
+            "step_order": 5
+        },
+        {
+            "hash": "89c3e0f712774595a1bc65e7e1dd712f",
+            "parameter": "{{GENERIC_PAIRING}} peakcalling/paraclu.bed peakcalling/paraclu",
+            "software": "bash",
+            "step_order": 3
+        }
+    ]
+}

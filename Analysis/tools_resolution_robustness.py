@@ -6,15 +6,18 @@ import argparse
 import json
 import logging
 import os
-import sys
 from configparser import ConfigParser
-from file_parser_mem.bed import parse_bed
+from cornerstone.file_parser_mem.bed import parse_bed
+from collections import defaultdict, namedtuple
 import numpy as np
 import pandas as pd
 import pyBigWig
 import pybedtools
 from pybedtools import BedTool
-from .utils import bin_scores, read_bed, midpoint_generator, run_command
+from .utils import bin_scores, read_bed, midpoint_generator, run_command, nfs_mapping, get_file_hash
+
+struct_ppc = namedtuple("PeakPairedComparison", field_names=("a_unique", "b_unique",
+                                                             "a_shared", "b_shared"))
 
 logging.basicConfig(format='%(name)s - %(asctime)s - %(levelname)s: %(message)s',
                     datefmt='%d-%b-%y %H:%M:%S',
@@ -23,6 +26,81 @@ logging.basicConfig(format='%(name)s - %(asctime)s - %(levelname)s: %(message)s'
                         logging.StreamHandler()
                     ])
 logger = logging.getLogger("PINTS - Resolution and robustness")
+
+
+def tu_benchmark(annotated_TUs, gencode_ptt_bed, save_to, local_registry):
+    """
+    Evaluate TU annotation tools
+
+    Parameters
+    ----------
+    annotated_TUs : dict
+        key : {tool}_{assay}
+        value : path to a bed file
+    gencode_ptt_bed : str
+        Path to a bed file which contains gencode protein-coding transcripts
+        In this study, for transcripts from the same gene, only the ones with the
+        highest expression level were kept
+    save_to : str
+        Path to write output
+    local_registry : str
+        Local registration (order) for outputs
+
+    Returns
+    -------
+    final_result_file : str
+        csv file contains the final result
+    """
+    final_result_file = os.path.join(save_to,
+                                     "{global_registry}_{local_registry}.csv".format(global_registry=global_registry,
+                                                                                     local_registry=local_registry))
+    if os.path.exists(final_result_file):
+        logger.info(f"Final output file {final_result_file} exists, skip...")
+    else:
+        def per_gene_overlap(x):
+            if x["a_overlap"] == 0:
+                return np.nan
+            else:
+                return x["a_overlap"] / (x["g_end"] - x["g_start"])
+
+        def per_tu_overlap(x):
+            try:
+                return x["a_overlap"] / (x["a_end"] - x["a_start"])
+            except:
+                return np.nan
+
+        def per_gene_jaccard(x):
+            if x["a_overlap"] == 0:
+                return np.nan
+            else:
+                min_coord = min(x["g_start"], x["g_end"], x["a_start"], x["a_end"])
+                max_coord = max(x["g_start"], x["g_end"], x["a_start"], x["a_end"])
+                return x["a_overlap"] / (max_coord - min_coord)
+
+        gencode_ptt_bed = BedTool(gencode_ptt_bed)
+        ga_tu_sdfs = []
+        for tool_assay in annotated_TUs:
+            tool, assay = tool_assay.split("_")
+            gencode_tool_df = gencode_ptt_bed.intersect(annotated_TUs[f"{tool}_{assay}"], wao=True, s=True).to_dataframe(
+                names=(
+                    "g_chrom", "g_start", "g_end", "g_gene", "g_exp", "g_strand", "a_chrom", "a_start", "a_end", "a_id",
+                    "a_score", "a_strand", "a_overlap")
+                )
+            gencode_tool_df["overlapG"] = gencode_tool_df.apply(per_gene_overlap, axis=1)
+            gencode_tool_df["overlapT"] = gencode_tool_df.apply(per_tu_overlap, axis=1)
+            gencode_tool_df["Jaccard"] = gencode_tool_df.apply(per_gene_jaccard, axis=1)
+            ga_tu_sdfs.append(pd.DataFrame(
+                {"Jaccard": gencode_tool_df.Jaccard.values,
+                 "overlapG": gencode_tool_df.overlapG.values,
+                 "overlapT": gencode_tool_df.overlapT.values,
+                    "Assay": assay,
+                 "Tool": tool, }
+            ))
+        ga_tu_df = pd.concat(ga_tu_sdfs)
+        ga_tu_mdf = ga_tu_df.melt(value_vars=("Jaccard", "overlapG", "overlapT"), id_vars=("Assay", "Tool"),
+                                  value_name="Consistency")
+        ga_tu_mdf.to_csv(final_result_file)
+    return final_result_file
 
 
 def evaluate_systematic_bias(peak_call_jobs_df, score_bws, ref_regions, chromosome_size,
@@ -488,13 +566,356 @@ def evaluate_real_case_robustness(peak_calls_tech, peak_calls_bio, correlations,
     return final_result_file
 
 
-def main(normal_calls, peak_calls_tech, peak_calls_bio, bam_cors, data_save_to, 
+def _uniq_ele_histone_profile_atom(tool_name, shared, pints_unique, other_unique, score_bws, chromosome_size,
+                                   region_extension):
+    """
+    Atom function for profiling histone modification signal
+
+    Parameters
+    ----------
+    tool_name : str
+        ss
+    shared : pybedtools.BedTool
+        Shared elements
+    pints_unique : pybedtools.BedTool
+        PINTS unique elements
+    other_unique : pybedtools.BedTool
+        Unique elements reported by other tools
+    score_bws : dict
+        key: Name of the corroborative mark (like H3K4me1, H3K27ac)
+        value: Path to the bigwig file
+    chromosome_size : str
+        Path to a tab-separated file which defines the size of each chromosome
+    region_extension : int
+        The final elements will be [original_mid-ref_region_extension, original_mid+ref_region_extension]
+
+    Returns
+    -------
+    results_df : pd.DataFrame
+        A dataframe with the following columns:
+            tool
+            label
+            marker
+            loc
+            mean
+            mean_u
+            mean_l
+            assay
+    """
+    results_pre_df = {
+        "tool": [],
+        "label": [],
+        "marker": [],
+        "loc": [],
+        "mean": [],
+        "mean_u": [],
+        "mean_l": [],
+        "assay": []
+    }
+    pints_s_mids = BedTool(midpoint_generator(shared)).saveas().slop(l=region_extension,
+                                                                     r=region_extension,
+                                                                     g=chromosome_size).saveas()
+    pints_u_mids = BedTool(midpoint_generator(pints_unique)).saveas().slop(l=region_extension,
+                                                                           r=region_extension,
+                                                                           g=chromosome_size).saveas()
+    other_u_mids = BedTool(midpoint_generator(other_unique)).saveas().slop(l=region_extension,
+                                                                           r=region_extension,
+                                                                           g=chromosome_size).saveas()
+
+    for corroborative_name, corroborative_path in score_bws.items():
+        with pyBigWig.open(corroborative_path) as ref_bw:
+            for bed_obj, label in zip((pints_s_mids, pints_u_mids, other_u_mids), ("Shared",
+                                                                                   "PINTS",
+                                                                                   tool_name)):
+                sm, m, s = bin_scores(bed_obj, ref_bw, bins=100)
+                results_pre_df["tool"].extend([tool_name] * m.shape[0])
+                results_pre_df["label"].extend([label] * m.shape[0])
+                results_pre_df["marker"].extend([corroborative_name] * m.shape[0])
+                results_pre_df["loc"].extend(np.arange(m.shape[0]).tolist())
+                results_pre_df["mean"].extend(m.tolist())
+                results_pre_df["mean_u"].extend(s[1].tolist())
+                results_pre_df["mean_l"].extend(s[0].tolist())
+                results_pre_df["assay"].extend([assay] * m.shape[0])
+    return pd.DataFrame(results_pre_df)
+
+
+def _uniq_ele_histone_profile(dict_ppc, score_bws, file_save_to, ref_region_extension=300, chromosome_size="hg38"):
+    """
+    Profile distribution of histone modification signal for unique elements
+
+    Parameters
+    ----------
+    dict_ppc : dict
+        key: name of peak calls used as control
+        value: struct_ppc (PeakPairedComparison)
+    score_bws : dict
+        key: Name of the corroborative mark (like H3K4me1, H3K27ac)
+        value: Path to the bigwig file
+    file_save_to : str
+        Write result to this file
+    ref_region_extension : int
+        The final elements will be [original_mid-ref_region_extension, original_mid+ref_region_extension]
+    chromosome_size : str
+        Path to a tab-separated file which defines the size of each chromosome
+
+    Returns
+    -------
+    file_save_to : str
+        Path to the result file
+    """
+    from multiprocessing import Pool
+
+    jobs = []
+    for tool, ppc_obj in dict_ppc.items():
+        # shared, pints_unique, other_unique, score_bws, chromosome_size, region_extension
+        jobs.append((tool, ppc_obj.a_shared, ppc_obj.a_unique, ppc_obj.b_unique,
+                     score_bws, chromosome_size, ref_region_extension))
+
+    with Pool(16) as pool:
+        sub_dfs = pool.starmap(_uniq_ele_histone_profile_atom, jobs)
+        pd.DataFrame(pd.concat(sub_dfs)).to_csv(file_save_to)
+    return file_save_to
+
+
+def _uniq_ele_motif_profile(dict_ppc, chromosome_size, genome_fa, output_prefix,
+                            extension=200, remove_longer_than=1000, n_motif=746, tmp_dir=".",
+                            motif_meme="data/JASPAR_CORE_2020_vertebrates.meme",
+                            ame_exec="export PATH=/programs/meme/bin:$PATH && ame"):
+    """
+    Profile motif enrichment for unique elements
+
+    Parameters
+    ----------
+    dict_ppc : dict
+        key: name of peak calls used as control
+        value: struct_ppc (PeakPairedComparison)
+    chromosome_size : str
+        Path to a tab-separated file containing chromosome sizes (chr    size)
+    genome_fa : str
+        Path to a FASTA file for sequence extraction
+    output_prefix : str
+        Output prefix
+    extension : int
+        Basepairs to be extended from the original elements/peaks. This is necessary, because several tools
+        generate very narrow elements that are even shorter than the k-mer in `motif_meme`. By default, 200.
+    remove_longer_than : int
+        Only peaks shorter than this cutoff will be kept for downstream analysis
+    n_motif : int
+        Number of motifs included in `motif_meme`
+    tmp_dir : str
+        Path to write tmp files
+    motif_meme : str
+        Path to a motif database in MEME format
+    ame_exec : str
+        Command for running AME
+
+    Returns
+    -------
+    (fn_lor, fn_loru, fn_lorl, fn_lorp) : (str, str, str, str)
+        Output files for log odds ratio
+        upper bounds of LORs
+        lower bounds of LORs
+        p-values for each comparison from z test (p-q=0?)
+    """
+    from multiprocessing import Pool
+    ame_lor_fn = output_prefix + "_AME_LOR.csv"
+    ame_loru_fn = output_prefix + "_AME_LORu.csv"
+    ame_lorl_fn = output_prefix + "_AME_LORl.csv"
+    ame_lorp_fn = output_prefix + "_AME_LORp.csv"
+    expected_files = (ame_lor_fn, ame_loru_fn, ame_lorl_fn, ame_lorp_fn)
+
+    if all([os.path.exists(f) for f in expected_files]):
+        logger.info(f"Final output files {expected_files} exists, skip...")
+    else:
+        jobs = []
+        ame_result_dirs = dict()
+        # first, use AME to scan unique elements (both PINTS and the other tool)
+        for tool, obj_ppc in dict_ppc.items():
+            pints_uniq = obj_ppc.a_unique
+            other_uniq = obj_ppc.b_unique
+            if extension > 0:
+                pints_uniq = obj_ppc.a_unique.slop(b=extension, g=chromosome_size).saveas()
+                other_uniq = obj_ppc.b_unique.slop(b=extension, g=chromosome_size).saveas()
+            pints_uniq = pints_uniq.filter(lambda x: len(x) < remove_longer_than).saveas()
+            other_uniq = other_uniq.filter(lambda x: len(x) < remove_longer_than).saveas()
+            pusf = pints_uniq.sequence(fi=genome_fa).seqfn
+            ousf = other_uniq.sequence(fi=genome_fa).seqfn
+            ame_save_to = os.path.join(tmp_dir, f"AME_PINTS_{tool}")
+            jobs.append(
+                f"{ame_exec} --evalue-report-threshold {n_motif} -o {ame_save_to} --control {ousf} {pusf} {motif_meme}"
+            )
+            ame_result_dirs[tool] = ame_save_to
+
+        with Pool(16) as pool:
+            ame_exec_results = pool.map(run_command, jobs)
+            for stdout, stderr, rc in ame_exec_results:
+                if rc != 0:
+                    logger.exception(stderr)
+
+        # then aggregate AME results
+        from statsmodels.stats.contingency_tables import Table2x2
+        AME_LOR_subdfs = []
+        AME_LORu_subdfs = []
+        AME_LORl_subdfs = []
+        AME_logpval_subdfs = []
+        for tool, ame_result_dir in ame_result_dirs.items():
+            expected_ame_output = os.path.join(ame_result_dir, "ame.tsv")
+            assert os.path.exists(expected_ame_output)
+            lor_vec = []
+            lor_u_vec = []
+            lor_l_vec = []
+            lor_pval_vec = []
+
+            known_results = pd.read_csv(expected_ame_output, sep="\t", comment="#")
+            for _, row in known_results.iterrows():
+                ctable = Table2x2(np.asarray(((row["TP"], row["pos"] - row["TP"]),
+                                              (row["FP"], row["neg"] - row["FP"]))))
+                ci_l, ci_u = ctable.log_oddsratio_confint(alpha=0.1)
+                lor_vec.append(ctable.log_oddsratio)
+                lor_u_vec.append(ci_u)  # upper CI
+                lor_l_vec.append(ci_l)  # lower CI
+                lor_pval_vec.append(ctable.log_oddsratio_pvalue())
+            known_results["log_odds_ratio"] = lor_vec
+            known_results["log_odds_ratio_upper"] = lor_u_vec
+            known_results["log_odds_ratio_lower"] = lor_l_vec
+            known_results["log_pval"] = lor_pval_vec
+            AME_LOR_subdfs.append(
+                known_results.loc[:, ("motif_alt_ID", "log_odds_ratio")].set_index("motif_alt_ID").rename(
+                    {"log_odds_ratio": tool}, axis=1)
+            )
+            AME_LORu_subdfs.append(
+                known_results.loc[:, ("motif_alt_ID", "log_odds_ratio_upper")].set_index("motif_alt_ID").rename(
+                    {"log_odds_ratio_upper": tool}, axis=1)
+            )
+            AME_LORl_subdfs.append(
+                known_results.loc[:, ("motif_alt_ID", "log_odds_ratio_lower")].set_index("motif_alt_ID").rename(
+                    {"log_odds_ratio_lower": tool}, axis=1)
+            )
+            AME_logpval_subdfs.append(
+                known_results.loc[:, ("motif_alt_ID", "log_pval")].set_index("motif_alt_ID").rename(
+                    {"log_pval": tool}, axis=1)
+            )
+
+        pd.concat(AME_LOR_subdfs, axis=1).replace([np.inf, -np.inf], 0).to_csv(ame_lor_fn)
+        pd.concat(AME_LORu_subdfs, axis=1).replace([np.inf, -np.inf], 0).to_csv(ame_loru_fn)
+        pd.concat(AME_LORl_subdfs, axis=1).replace([np.inf, -np.inf], 0).to_csv(ame_lorl_fn)
+        pd.concat(AME_logpval_subdfs, axis=1).replace([np.inf, -np.inf], 0).to_csv(ame_lorp_fn)
+    return expected_files
+
+
+def profile_unique_set(peak_calls_df, genome_fa, dict_signal_track_bws, promoter, motif_meme, chromosome_size, save_to,
+                       local_registry, tmp_dir="."):
+    """
+    Profile unique peaks
+
+    Parameters
+    ----------
+    peak_calls_df : pd.DataFrame
+        DataFrame containing Tool, Genome release, Cell line, Assay, Biorep, Techrep, File
+    genome_fa : str
+        Path to a FASTA file for sequence extraction
+    dict_signal_track_bws : dict
+        key: Name of the corroborative mark (like H3K4me1, H3K27ac)
+        value: Path to the bigwig file
+    promoter : str
+        Path to a bed file, which defines all promoter regions
+    motif_meme : str
+        Path to a motif database in MEME format
+    chromosome_size : str
+        Path to a tab-separated file which defines the size of each chromosome
+    save_to : str
+        Folder to store the figure
+    local_registry : str
+        Local registration (order) for outputs
+    tmp_dir : str
+        Path to write tmp files
+
+    Returns
+    -------
+    histone_result_file : str
+        Output file contains results for histone modifications
+    (fn_lor, fn_loru, fn_lorl, fn_lorp) : (str, str, str, str)
+        Output files for log odds ratio
+        upper bounds of LORs
+        lower bounds of LORs
+        p-values for each comparison from z test (p-q=0?)
+    """
+    promoter_bed = BedTool(promoter)
+    sdf = peak_calls_df.loc[
+          (peak_calls_df["Genome release"] == "hg38") & (peak_calls_df["Cell line"] == "K562") & (
+                      peak_calls_df["Assay"] == "GROcap"), :]
+    # get unique peaks comparing to PINTS (distal only)
+    pints_bed = BedTool(sdf.loc[sdf.Tool == "PINTS", "File"].values[0])
+    sdf = sdf.loc[sdf.Tool != "PINTS", :]
+    assert all([c == 1 for c in sdf.Tool.value_counts()])
+
+    uniq_element_dict = dict()
+    for _, row in sdf.iterrows():
+        tmp = read_bed(row["File"])
+        tmp = tmp.loc[tmp[0].str.startswith("chr"), :]
+        if tmp.shape[1] > 6:
+            tmp = tmp.loc[:, tmp.columns[:6]]
+
+        tmp[1] = tmp[1].astype(int)
+        tmp[2] = tmp[2].astype(int)
+        tool_bed = BedTool.from_dataframe(tmp)
+        pints_uniq = pints_bed.intersect(tool_bed, v=True).saveas().intersect(promoter_bed, v=True).saveas()
+        tool_uniq = tool_bed.intersect(pints_bed, v=True).saveas().intersect(promoter_bed, v=True).saveas()
+        pints_shared = pints_bed.intersect(tool_bed, u=True).saveas().intersect(promoter_bed, v=True).saveas()
+        tool_shared = tool_bed.intersect(pints_bed, u=True).saveas().intersect(promoter_bed, v=True).saveas()
+        logger.info(f"PINTS vs {row['Tool']}: Pu\t{pints_uniq.count()}\tTu\t{tool_uniq.count()}")
+        uniq_element_dict[row["Tool"]] = struct_ppc._make((pints_uniq, tool_uniq, pints_shared, tool_shared))
+
+    # histone modifications
+    histone_result_file = os.path.join(save_to,
+                                       "{global_registry}_{local_registry}_histone.csv".format(
+                                           global_registry=global_registry,
+                                           local_registry=local_registry))
+    if os.path.exists(histone_result_file):
+        logger.info(f"Final output file {histone_result_file} exists, skip...")
+    else:
+        logger.info("Check histone profiles among unique elements...")
+        _uniq_ele_histone_profile(dict_ppc=uniq_element_dict, score_bws=dict_signal_track_bws,
+                                  file_save_to=histone_result_file,
+                                  ref_region_extension=300, chromosome_size=chromosome_size)
+        logger.info(f"Result saved to {histone_result_file} (digest: {get_file_hash(histone_result_file)[:7]})")
+    # motifs
+    logger.info("Profiling motif distribution among unique elements")
+    fn_lor, fn_loru, fn_lorl, fn_lorp = _uniq_ele_motif_profile(dict_ppc=uniq_element_dict,
+                                                                chromosome_size=chromosome_size, genome_fa=genome_fa,
+                                                                output_prefix=os.path.join(save_to,
+                                                                                           "{global_registry}_{local_registry}".format(
+                                                                                               global_registry=global_registry,
+                                                                                               local_registry=local_registry)),
+                                                                extension=200, remove_longer_than=1000,
+                                                                n_motif=746, tmp_dir=tmp_dir,
+                                                                motif_meme=motif_meme,
+                                                                ame_exec="export PATH=/programs/meme/bin:$PATH && ame")
+    logger.info(f"Result (part 1) saved to {fn_lor} (digest: {get_file_hash(fn_lor)[:7]})")
+    logger.info(f"Result (part 2) saved to {fn_loru} (digest: {get_file_hash(fn_loru)[:7]})")
+    logger.info(f"Result (part 3) saved to {fn_lorl} (digest: {get_file_hash(fn_lorl)[:7]})")
+    logger.info(f"Result (part 4) saved to {fn_lorp} (digest: {get_file_hash(fn_lorp)[:7]})")
+    return histone_result_file, fn_lor, fn_loru, fn_lorl, fn_lorp
+
+
+
+
+def main(normal_calls, peak_calls_tech, peak_calls_bio, peak_calls_uniq, bam_cors, data_save_to, 
          gc_files, hg19_to_38_chain_file, hg38_to_19_chain_file, hg19_promoters, 
-         hg38_promoters, score_bws, ref_regions, chromosome_size, data_prefix=""):
+         hg38_promoters, score_bws, ref_regions, chromosome_size, genome_fa, jaspar_meme, 
+         assay_groups=dict(), data_prefix="", **kwargs):
     analysis_summaries = {
+        "tu_annotation": [],
         "resolution": [],
         "robustness": [],
+        "unique_set": [],
     }
+
+    annotated_TUs = kwargs.get("annotated_TUs", None)
+    gencode_ptt_bed = kwargs.get("gencode_ptt_bed", None)
+    if annotated_TUs is not None and gencode_ptt_bed is not None:
+        tu_results = tu_benchmark(annotated_TUs, gencode_ptt_bed, save_to=data_save_to, local_registry="JaccardTU")
+        analysis_summaries["tu_annotation"].append(tu_results)
 
     peak_calls_pre_df = []
     for k, v in normal_calls.items():
@@ -535,6 +956,29 @@ def main(normal_calls, peak_calls_tech, peak_calls_bio, bam_cors, data_save_to,
                                                         local_registry="RobustnessRealCases")
     analysis_summaries["robustness"].append(tech_bio_robustness)
 
+    histone_bws = dict()
+    for k, v in score_bws.items():
+        cell_line, mark = k.split("_")
+        if cell_line == "K562" and mark in ("H3K27ac", "H3K4me1"):
+            histone_bws[mark] = nfs_mapping(v)
+    # for TSScall, use only divergent calls
+    peak_calls_pre_df = []
+    for k, v in peak_calls_uniq.items():
+        tool, genome_release, cell_line, assay, bio_rep, tech_rep = k.split("_")
+        peak_calls_pre_df.append((tool, genome_release, cell_line, assay, bio_rep, tech_rep, v))
+        
+    peak_calls_df = pd.DataFrame(peak_calls_pre_df, columns=("Tool", "Genome release", "Cell line", "Assay",
+                                                                 "Biorep", "Techrep", "File"))
+    unique_outputs = profile_unique_set(peak_calls_df, genome_fa,
+                                        dict_signal_track_bws=histone_bws,
+                                        promoter=hg38_promoters,
+                                        chromosome_size=chromosome_size,
+                                        motif_meme=jaspar_meme,
+                                        save_to=data_save_to,
+                                        tmp_dir=tmp_dir,
+                                        local_registry="UniqueElements")
+    analysis_summaries["unique_set"].extend(unique_outputs)
+
     with open(os.path.join(data_save_to, f"{data_prefix}_summary.json"), "w") as fh:
         json.dump(analysis_summaries, fh)
 
@@ -562,32 +1006,36 @@ if __name__ == "__main__":
     cfg = ConfigParser()
     cfg.optionxform = str
     cfg.read(args.config_file)
-    collapsed_assays = cfg.get("assays", "plot_order_simplified").split("|")
-
-    global tmp_dir, n_threads, n_samples, global_registry, full_assays, highlight_assays, layouts, unified_color_map, official_name_map
+    
+    global tmp_dir, global_registry, full_assays, layouts, unified_color_map, ucm_assay, official_name_map
     tmp_dir = args.tmp_dir
     pybedtools.set_tempdir(tmp_dir)
-    n_threads = int(cfg.get("global", "n_threads"))
     global_registry = args.global_registry
     full_assays = cfg.get("assays", "plot_order_full").split("|")
-    highlight_assays = cfg.get("assays", "plot_order_simplified").split("|")
     assay_offical_names = cfg.get("assays", "assay_full_names").split("|")
+    assay_plot_color = cfg.get("assays", "plot_colors").split("|")
+
     layouts = dict()
     for k, v in cfg["dataset_layouts"].items():
         layouts[k] = v
 
+    ucm_assay = dict()
     unified_color_map = dict()
     official_name_map = dict()
     plot_order = cfg.get("tools", "plot_order").split("|")
     plot_color = cfg.get("tools", "plot_color").split("|")
     unified_color_map = dict()
+    for k, v in enumerate(full_assays):
+        ucm_assay[v] = assay_plot_color[k]
     for k, v in enumerate(plot_order):
         unified_color_map[v] = plot_color[k]
     for k, v in enumerate(cfg.get("assays", "plot_order_full").split("|")):
         official_name_map[v] = assay_offical_names[k]
     official_name_map["GROcap*"] = "GRO-cap"
 
+    tu_calls = {}
     normal_calls = {}
+    unique_calls = {}
     tech_calls = {}
     bio_calls = {}
     bi_ref_covs = {}
@@ -601,10 +1049,23 @@ if __name__ == "__main__":
         bioq_dir = os.path.join(server2_home_dir, "BioQueue/workspace")
         from .utils import load_bioq_datasets
 
+        tu_calls = load_bioq_datasets("tu_jobs", bioq_dir, cfg_file=args.config_file)
         normal_calls = load_bioq_datasets("peak_call_job_ids", bioq_dir, cfg_file=args.config_file)
+        unique_calls = load_bioq_datasets("peak_call_ue_ids", bioq_dir, cfg_file=args.config_file)
         tech_calls = load_bioq_datasets("peak_call_tech_rep", bioq_dir, cfg_file=args.config_file)
         bio_calls = load_bioq_datasets("peak_call_bio_rep", bioq_dir, cfg_file=args.config_file)
         bi_ref_covs = load_bioq_datasets("genomewide_hist_coverage", bioq_dir, cfg_file=args.config_file)
+
+    # check peak call files and keys make sure their descriptions match
+    # peak_call_job_ids:
+    #   keys: tool_assay
+    for k, v in tu_calls.items():
+        if not os.path.exists(v):
+            logger.error(f"Cannot locate peak calls for {k} {v}")
+        tool, assay = k.split("_")
+        tool = tool.replace(".", "")
+        if not all([v.find(j) != -1 for j in (tool, assay)]):
+            logger.error(f"{k} and {v} don't seem to match with each other")
 
     # check peak call files and keys make sure their descriptions match
     # peak_call_job_ids:
@@ -628,17 +1089,25 @@ if __name__ == "__main__":
             assay = assay.replace("*", "")
             if v.find(assay) == -1 or (v.find(tool) == -1 and v.find(tool.replace(".", "")) == -1):
                 logger.error(f"{k} and {v} don't seem to match with each other")
+    end_groups = cfg["dataset_precise_ends"]
+    assay_groups = defaultdict(list)
+    for k, v in end_groups.items():
+        assay_groups[v[:1]].append(k)
+
     try:
         main(normal_calls=normal_calls, peak_calls_tech=tech_calls,
-             peak_calls_bio=bio_calls, bam_cors=args.bam_correlation_mat,
+             peak_calls_bio=bio_calls, peak_calls_uniq=unique_calls, bam_cors=args.bam_correlation_mat,
              data_save_to=args.data_save_to, 
-             gc_files=bi_ref_covs,
-             hg19_to_38_chain_file=cfg.get("references", "liftover_chain_19_38"),
-             hg38_to_19_chain_file=cfg.get("references", "liftover_chain_38_19"),
-             hg19_promoters=cfg.get("references", "promoter_hg19"),
-             hg38_promoters=cfg.get("references", "promoter_hg38"),
-             score_bws=cfg["corroborative_bws"], ref_regions=cfg.get("references", "true_enhancers"),
-             chromosome_size=cfg.get("references", "hg38_chromsize_genome"),
+             gc_files=bi_ref_covs, assay_groups=assay_groups,
+             hg19_to_38_chain_file=nfs_mapping(cfg.get("references", "liftover_chain_19_38")),
+             hg38_to_19_chain_file=nfs_mapping(cfg.get("references", "liftover_chain_38_19")),
+             hg19_promoters=nfs_mapping(cfg.get("references", "promoter_hg19")),
+             hg38_promoters=nfs_mapping(cfg.get("references", "promoter_hg38")),
+             score_bws=cfg["corroborative_bws"], ref_regions=nfs_mapping(cfg.get("references", "true_enhancers")),
+             chromosome_size=nfs_mapping(cfg.get("references", "hg38_chromsize_genome")),
+             genome_fa=nfs_mapping(cfg.get("references", "hg38_genome")),
+             jaspar_meme=nfs_mapping(cfg.get("references", "jaspar_meme")), annotated_TUs=tu_calls,
+             gencode_ptt_bed=nfs_mapping(cfg.get("references", "gencode_highest_pt_transcripts")),
              data_prefix=args.data_prefix)
     except Exception as e:
         logger.exception(e)
