@@ -1,0 +1,18 @@
+{
+    "name": "Bam to hist of genome-wide coverage (for hg19 vs hg38)",
+    "reference": {},
+    "step": [
+        {
+            "hash": "438f388f31b4058f48d1f4a45e5cea22",
+            "parameter": "-ibam {{InputFile:1}} -split {{Flexible}} | grep ^genome > {{JobName}}_hg19.txt",
+            "software": "genomeCoverageBed",
+            "step_order": 1
+        },
+        {
+            "hash": "c100ae7aebf82163689acec2d8c09143",
+            "parameter": "-ibam {{InputFile:2}} -split {{Flexible}} | grep ^genome > {{JobName}}_hg38.txt",
+            "software": "genomeCoverageBed",
+            "step_order": 2
+        }
+    ]
+}

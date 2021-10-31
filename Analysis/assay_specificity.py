@@ -14,7 +14,7 @@ import pandas as pd
 from pybedtools import BedTool
 from multiprocessing import Pool
 from configparser import ConfigParser
-from .utils import bed_bed_strand_specific_coverage, bin_scores, contrast_regions, run_command
+from .utils import bed_bed_strand_specific_coverage, bin_scores, contrast_regions, run_command, msg_wrapper, nfs_mapping
 
 logging.basicConfig(format="%(name)s - %(asctime)s - %(levelname)s: %(message)s",
                     datefmt="%d-%b-%y",
@@ -86,6 +86,7 @@ def parse_read_distribution(exp_name, input_bed, genome_segmentation):
         logger.error(e, exp_name, input_bed)
 
 
+@msg_wrapper(logger)
 def read_distribution_atom(bed_files, segmentation, save_to, local_registry):
     """
     Atom for parsing read distribution
@@ -115,8 +116,7 @@ def read_distribution_atom(bed_files, segmentation, save_to, local_registry):
             args = []
             for k, bed in bed_files.items():
                 cell_line, exp = k.split("_")
-                if cell_line.startswith("K562"):
-                    args.append((exp, bed % i, segmentation))
+                args.append((exp, bed % i, segmentation))
             with Pool(n_threads) as pool:
                 read_distributions = pool.starmap(parse_read_distribution, args)
             rd_cols = []
@@ -147,6 +147,7 @@ def read_distribution_atom(bed_files, segmentation, save_to, local_registry):
     return final_result_file
 
 
+@msg_wrapper(logger)
 def get_read_counts_from_bed(bed_files, save_to, global_registry, local_registry):
     final_result_file = os.path.join(save_to,
                                      "{global_registry}_{local_registry}.csv".format(global_registry=global_registry,
@@ -158,10 +159,9 @@ def get_read_counts_from_bed(bed_files, save_to, global_registry, local_registry
         # for bed, exp in zip(bed_files, labels):
         for k, bed in bed_files.items():
             cell_line, exp = k.split("_")
-            if cell_line.startswith("K562"):
-                fn_open = gzip.open if bed.endswith('.gz') else open
-                mode = "rt" if bed.endswith('.gz') else "r"
-                results.append((exp, sum([1 for t in fn_open(bed, mode)])))
+            fn_open = gzip.open if bed.endswith('.gz') else open
+            mode = "rt" if bed.endswith('.gz') else "r"
+            results.append((exp, sum([1 for t in fn_open(bed, mode)])))
         pd.DataFrame(results, columns=("Assay", "Reads")).to_csv(final_result_file)
     return final_result_file
 
@@ -232,6 +232,7 @@ def _parse_read_distribution(exp_name, input_bed, abundant_rna_bed, tmp_dir=".")
         logger.error(f"{e} {exp_name} {input_bed}")
 
 
+@msg_wrapper(logger)
 def get_reads_from_abundant_transcripts(bed_files, abundant_rna_file, save_to, global_registry, local_registry,
                                         n_threads=16, tmp_dir="."):
     """
@@ -270,10 +271,7 @@ def get_reads_from_abundant_transcripts(bed_files, abundant_rna_file, save_to, g
         # for exp, sample in zip(labels, bed_files):
         for k, sample in bed_files.items():
             cell_line, exp = k.split("_")
-            if cell_line.startswith("K562"):
-                args.append((exp, sample, abundant_rna_bed, tmp_dir))
-            else:
-                logger.warning(f"Abundant transcript not evaluated {k}, as it's not K562-derived.")
+            args.append((exp, sample, abundant_rna_bed, tmp_dir))
 
         with Pool(n_threads) as pool:
             rep_result = pool.starmap(_parse_read_distribution, args)
@@ -322,6 +320,7 @@ def _atom_ss_agg(bw_path, bed_5ss_flanked, bed_3ss_flanked, save_to, name, bins=
     return m_5, (l_5, u_5), m_3, (l_3, u_3)
 
 
+@msg_wrapper(logger)
 def get_reads_around_splicing_sites(generic_bws, bed_5ss, bed_3ss, save_to, local_registry, bins=400):
     """
 
@@ -355,9 +354,8 @@ def get_reads_around_splicing_sites(generic_bws, bed_5ss, bed_3ss, save_to, loca
             jobs = []
             for k, bw in generic_bws.items():
                 cell_line, exp = k.split("_")
-                if cell_line.startswith("K562"):
-                    labels.append(exp)
-                    jobs.append((bw, bed_5ss, bed_3ss, save_to, exp, bins))
+                labels.append(exp)
+                jobs.append((bw, bed_5ss, bed_3ss, save_to, exp, bins))
             direct_results = pool.starmap(_atom_ss_agg, jobs)
 
         results = []
@@ -371,6 +369,7 @@ def get_reads_around_splicing_sites(generic_bws, bed_5ss, bed_3ss, save_to, loca
     return final_result_file
 
 
+@msg_wrapper(logger)
 def get_signal_to_noise_ratios(bed_files, save_to, pos_region_file, neg_region_file, promoter_file,
                                global_registry, local_registry):
     """
@@ -422,9 +421,8 @@ def get_signal_to_noise_ratios(bed_files, save_to, pos_region_file, neg_region_f
 
                 for k, sample in bed_files.items():
                     cell_line, exp = k.split("_")
-                    if cell_line.startswith("K562"):
-                        exps.append(exp)
-                        args.append((ref, sample % (rep + 1), exp))
+                    exps.append(exp)
+                    args.append((ref, sample % (rep + 1), exp))
 
                 with Pool(n_threads) as pool:
                     rep_result = pool.starmap(bed_bed_strand_specific_coverage, args)
@@ -456,6 +454,7 @@ def _atom_assay_confusion_mat(pos_ref, neg_ref, bin_df, top_bin_cut, assay):
     return tp, fp, fn, tn
 
 
+@msg_wrapper(logger)
 def calculate_fdr_per_assay(bins_df_file, pos_ref, neg_ref, save_to, global_registry, local_registry):
     """
     Calculate FDR per assay
@@ -514,6 +513,7 @@ def calculate_fdr_per_assay(bins_df_file, pos_ref, neg_ref, save_to, global_regi
     return final_result_file
 
 
+@msg_wrapper(logger)
 def contrast_te_ne(te, ne, score_bw_dict, chromosome_size, save_to, global_registry, local_registry,
                    region_extension=1000, n_bins=100):
     final_result_file = os.path.join(save_to,
@@ -531,7 +531,7 @@ def contrast_te_ne(te, ne, score_bw_dict, chromosome_size, save_to, global_regis
     return final_result_file
 
 
-def main(data_save_to, data_prefix="", **kwargs):
+def main(data_save_to, data_prefix="", local_registry="K562", **kwargs):
     """
     Factory
 
@@ -582,11 +582,11 @@ def main(data_save_to, data_prefix="", **kwargs):
         "signal_to_noise": []
     }
 
-    dsc_beds = kwargs.pop("dsc_beds")
-    bed_files = kwargs.pop("bed_files")
+    dsc_beds = kwargs.pop("dsc_beds", None)
+    bed_files = kwargs.pop("bed_files", None)
     precise_end_bw_files = kwargs.pop("precise_end_bw_files")
-    segmentations = kwargs.pop("segmentations")
-    abundant_rna = kwargs.pop("abundant_rna")
+    segmentations = kwargs.pop("segmentations", None)
+    abundant_rna = kwargs.pop("abundant_rna", None)
     file_5ss = kwargs.pop("file_5ss")
     file_3ss = kwargs.pop("file_3ss")
     te_bed = kwargs.pop("te_bed")
@@ -596,61 +596,133 @@ def main(data_save_to, data_prefix="", **kwargs):
     cor_bws = kwargs.pop("cor_bws")
     chromosome_size = kwargs.pop("chromosome_size")
 
+    par_msgs = {
+            "dsb_beds": "a dictionary of paths to downsampled bed files",
+            "segmentations": "a bed file which defines genomic segmentation",
+            "bed_files": "a dictionary of bed files converted directly from bam files",
+            "precise_end_bw_files": "",
+            "abundant_rna": "a bed file which defines the coordinates of abundant RNAs/DNAs",
+            "file_5ss": "a bed file which defines 5' splicing sites and flanking regions",
+            "file_3ss": "a bed file which defines 3' splicing sites and flanking regions",
+            "te_bed": "a bed file which defines true enhancer loci",
+            "ne_bed": "a bed file which defines non enhancer loci",
+            "promoter_bed": "a bed file which defines promoter loci",
+            "gb_cov_tab": "a tab-seperated file which stores read coverage across genomic bins",
+            "cor_bws": "a dict of corroborative bigwig files",
+            "chromosome_size": "a file defines sizes of chromosomes",
+        }
+
     # read distribution
-    i = 0
-    for segmentation in segmentations:
-        seg_bed = BedTool(segmentation)
-        distribution_dat = read_distribution_atom(bed_files=dsc_beds, segmentation=seg_bed,
-                                                    save_to=data_save_to, local_registry=f"ReadDistribution{i}")
-        analysis_summaries["read_distribution"].append(distribution_dat)
-        i += 1
+    if dsc_beds is not None and segmentations is not None and len(dsc_beds) > 0:
+        i = 0
+        for segmentation in segmentations:
+            seg_bed = BedTool(segmentation)
+            distribution_dat = read_distribution_atom(bed_files=dsc_beds, segmentation=seg_bed,
+                                                      save_to=data_save_to,
+                                                      local_registry=f"ReadDistribution{i}_{local_registry}")
+            analysis_summaries["read_distribution"].append(distribution_dat)
+            i += 1
+    else:
+        logger.warning(f"Cannot run {read_distribution_atom} on {local_registry}")
+        if dsc_beds is None:
+            logger.info(f" - Missing {par_msgs['dsc_beds']} (dsc_beds)")
+        if segmentations is None:
+            logger.info(f" - Missing {par_msgs['segmentations']} (segmentations)")
+
     # total read counts
-    read_counts = get_read_counts_from_bed(bed_files=bed_files, save_to=data_save_to,
-                                            global_registry=global_registry,
-                                            local_registry="TotalReadCounts")
-    analysis_summaries["read_counts"].append(read_counts)
+    if bed_files is not None and len(bed_files) > 0:
+        read_counts = get_read_counts_from_bed(bed_files=bed_files, save_to=data_save_to,
+                                                global_registry=global_registry,
+                                                local_registry=f"TotalReadCounts_{local_registry}")
+        analysis_summaries["read_counts"].append(read_counts)
+    else:
+        logger.warning(f"Cannot run {get_read_counts_from_bed} on {local_registry}")
+        logger.info(f" - Missing {par_msgs['bed_files']} (bed_files)")
 
     # reads from abundant transcripts
-    abundant_transcripts_dat = get_reads_from_abundant_transcripts(bed_files=bed_files,
-                                                                    abundant_rna_file=abundant_rna,
-                                                                    save_to=data_save_to,
-                                                                    global_registry=global_registry,
-                                                                    local_registry="AbundantTranscript",
-                                                                    tmp_dir=tmp_dir)
-    analysis_summaries["abundant_transcripts"].append(abundant_transcripts_dat)
+    if bed_files is not None and abundant_rna is not None and len(bed_files) > 0:
+        abundant_transcripts_dat = get_reads_from_abundant_transcripts(bed_files=bed_files,
+                                                                        abundant_rna_file=abundant_rna,
+                                                                        save_to=data_save_to,
+                                                                        global_registry=global_registry,
+                                                                        local_registry=f"AbundantTranscript_{local_registry}",
+                                                                        tmp_dir=tmp_dir)
+        analysis_summaries["abundant_transcripts"].append(abundant_transcripts_dat)
+    else:
+        logger.warning(f"Cannot perform {get_reads_from_abundant_transcripts} on {local_registry}")
+        if bed_files is None:
+            logger.info(f" - Missing {par_msgs['bed_files']} (bed_files)")
+        if abundant_rna is None:
+            logger.info(f" - Missing {par_msgs['abundant_rna']} (abundant_rna)")
 
     # splicing intermediates
-    splicing_dat = get_reads_around_splicing_sites(generic_bws=precise_end_bw_files,
-                                                    bed_5ss=BedTool(file_5ss),
-                                                    bed_3ss=BedTool(file_3ss), save_to=data_save_to,
-                                                    local_registry="SplicingIntermediates")
-    analysis_summaries["splicing_intermediates"].append(splicing_dat)
+    if precise_end_bw_files is not None and file_5ss is not None and file_3ss is not None and len(precise_end_bw_files) > 0:
+        splicing_dat = get_reads_around_splicing_sites(generic_bws=precise_end_bw_files,
+                                                        bed_5ss=BedTool(file_5ss),
+                                                        bed_3ss=BedTool(file_3ss), save_to=data_save_to,
+                                                        local_registry=f"SplicingIntermediates_{local_registry}")
+        analysis_summaries["splicing_intermediates"].append(splicing_dat)
+    else:
+        logger.warning(f"Cannot run {get_reads_around_splicing_sites} on {local_registry}")
+        if precise_end_bw_files is None:
+            logger.info(f" - Missing {par_msgs['bed_files']} (bed_files)")
+        if file_5ss is None:
+            logger.info(f" - Missing {par_msgs['file_5ss']} (file_5ss)")
+        if file_3ss is None:
+            logger.info(f" - Missing {par_msgs['file_3ss']} (file_3ss)")
 
     # FC
-    te_ne_fc = get_signal_to_noise_ratios(bed_files=dsc_beds, save_to=data_save_to,
-                                            pos_region_file=te_bed, neg_region_file=ne_bed,
-                                            promoter_file=promoter_bed, global_registry=global_registry,
-                                            local_registry="FC")
-    analysis_summaries["signal_to_noise"].append(te_ne_fc)
+    if dsc_beds is not None and te_bed is not None and ne_bed is not None and promoter_bed is not None and len(dsc_beds) > 0:
+        te_ne_fc = get_signal_to_noise_ratios(bed_files=dsc_beds, save_to=data_save_to,
+                                                pos_region_file=te_bed, neg_region_file=ne_bed,
+                                                promoter_file=promoter_bed, global_registry=global_registry,
+                                                local_registry=f"FC_{local_registry}")
+        analysis_summaries["signal_to_noise"].append(te_ne_fc)
+    else:
+        logger.warning(f"Cannot run {get_signal_to_noise_ratios} on {local_registry}")
+        if dsc_beds is None:
+            logger.info(f" - Missing {par_msgs['dsc_beds']} (dsc_beds)")
+        if te_bed is None:
+            logger.info(f" - Missing {par_msgs['te_bed']} (te_bed)")
+        if ne_bed is None:
+            logger.info(f" - Missing {par_msgs['ne_bed']} (ne_bed)")
+        if promoter_bed is None:
+            logger.info(f" - Missing {par_msgs['promoter_bed']} (promoter_bed)")
 
     # FDR
-    fdr_res = calculate_fdr_per_assay(bins_df_file=gb_cov_tab, pos_ref=te_bed, neg_ref=ne_bed,
-                                        save_to=data_save_to, global_registry=global_registry,
-                                        local_registry="FDR")
-    analysis_summaries["signal_to_noise"].append(fdr_res)
+    if gb_cov_tab is not None and te_bed is not None and ne_bed is not None:
+        fdr_res = calculate_fdr_per_assay(bins_df_file=gb_cov_tab, pos_ref=te_bed, neg_ref=ne_bed,
+                                            save_to=data_save_to, global_registry=global_registry,
+                                            local_registry=f"FDR_{local_registry}")
+        analysis_summaries["signal_to_noise"].append(fdr_res)
+    else:
+        logger.warning(f"Cannot run {calculate_fdr_per_assay} on {local_registry}")
+        if gb_cov_tab is None:
+            logger.info(f" - Missing {par_msgs['gb_cov_tab']} (gb_cov_tab)")
+        if te_bed is None:
+            logger.info(f" - Missing {par_msgs['te_bed']} (te_bed)")
+        if ne_bed is None:
+            logger.info(f" - Missing {par_msgs['ne_bed']} (ne_bed)")
 
     # TE vs. NE
-    score_bw_dict = {
-        "K562_DHS": cor_bws["K562_DHS"],
-        "K562_H3K27ac": cor_bws["K562_H3K27ac"],
-        "K562_CTCF": cor_bws["K562_CTCF"],
-    }
-    r = contrast_te_ne(te=te_bed, ne=ne_bed, score_bw_dict=score_bw_dict, chromosome_size=chromosome_size,
-                        save_to=data_save_to, global_registry=global_registry, local_registry="TrueEvsFalseE",
-                        region_extension=1000, n_bins=100)
-    analysis_summaries["signal_to_noise"].append(r)
+    if chromosome_size is not None and te_bed is not None and ne_bed is not None and cor_bws is not None and len(cor_bws) > 0:
+            r = contrast_te_ne(te=te_bed, ne=ne_bed, score_bw_dict=cor_bws, chromosome_size=chromosome_size,
+                               save_to=data_save_to, global_registry=global_registry,
+                               local_registry=f"TrueEvsFalseE_{local_registry}",
+                               region_extension=1000, n_bins=100)
+            analysis_summaries["signal_to_noise"].append(r)
+    else:
+        logger.warning(f"Cannot run {contrast_te_ne} on {local_registry}")
+        if chromosome_size is None:
+            logger.info(f" - Missing {par_msgs['chromosome_size']} (chromosome_size)")
+        if file_5ss is None:
+            logger.info(f" - Missing {par_msgs['te_bed']} (te_bed)")
+        if file_3ss is None:
+            logger.info(f" - Missing {par_msgs['ne_bed']} (ne_bed)")
+        if cor_bws is None or len(cor_bws) == 0:
+            logger.info(f" - Missing {par_msgs['cor_bws']} (cor_bws)")
 
-    with open(os.path.join(data_save_to, f"{data_prefix}_summary.json"), "w") as fh:
+    with open(os.path.join(data_save_to, f"{data_prefix}_summary_{local_registry}.json"), "w") as fh:
         json.dump(analysis_summaries, fh)
 
 
@@ -659,10 +731,17 @@ if __name__ == "__main__":
     parser.add_argument("--data-save-to", required=True, help="Save output data to")
     parser.add_argument("--abundant-rna", required=False,
                         help="Abundant RNA loci defined in a bed file")
-    parser.add_argument("--te-bed", required=False, help="True enhancers defined in a bed file")
+    parser.add_argument("--te-bed", required=False, help="True enhancers defined in a bed file",
+                        default="/local/storage/ly349/projects/peakcalling/data/criteria/v3_20200614/hglft_Enhancers_K562_1a3f2b86-892c-49ac-a61d-4a33e746028e.bed")
+    parser.add_argument("--te-bed-supplementary", required=False,
+                        default="/local/storage/ly349/projects/peakcalling/data/criteria/20210715/hglft_Enhancers_GM12878_ca90d622-b704-4e74-8b2d-95be409c1ffa.hg38.bed",
+                        help="True enhancers defined in a bed file for other biosamples")
     parser.add_argument("--ne-bed", required=False,
                         default="/local/storage/ly349/projects/peakcalling/data/refs/compiled/Nonenhancers_nonepls.bed",
                         help="Bed file which includes definitions for non-enhancers")
+    parser.add_argument("--ne-bed-supplementary", required=False,
+                        default="/local/storage/ly349/projects/peakcalling/data/refs/compiled/GM12878_Nonenhancers_nonepls.bed",
+                        help="None enhancers defined in a bed file for other biosamples")
     parser.add_argument("--bed-promoter", required=False,
                         default="/local/storage/ly349/refs/annotations/human/hg38/segmentation/promoters_1kb_tss_centered.bed",
                         help="Bed file which includes definitions for promoters")
@@ -704,7 +783,7 @@ if __name__ == "__main__":
     global_registry = args.global_registry
     full_assays = cfg.get("assays", "plot_order_full").split("|")
     highlight_assays = cfg.get("assays", "plot_order_simplified").split("|")
-    assay_offical_names = cfg.get("assays", "assay_full_names").split("|")
+    assay_official_names = cfg.get("assays", "assay_full_names").split("|")
     layouts = dict()
     for k, v in cfg["dataset_layout_conversion"].items():
         layouts[k] = v
@@ -719,7 +798,7 @@ if __name__ == "__main__":
     cor_bws = cfg["corroborative_bws"]
     for k, v in enumerate(plot_order):
         unified_color_map[v] = plot_color[k]
-        official_name_map[v] = assay_offical_names[k]
+        official_name_map[v] = assay_official_names[k]
     unified_color_map_s = dict()
     for k, v in enumerate(plot_order_simplified):
         unified_color_map_s[v] = unified_color_map[v]
@@ -728,7 +807,9 @@ if __name__ == "__main__":
     pe_bws = dict()
     beds = dict()
     dsc_beds = dict()
-    gb_cov_tab = None
+    ubams = dict()
+    k562_gb_cov_tab = None
+    gm12878_gb_cov_tab = None
 
     import socket
 
@@ -744,13 +825,42 @@ if __name__ == "__main__":
     beds = load_bioq_datasets("all_alignments_merged_beds", bioq_dir, cfg_file=args.config_file)
     dsc_beds = load_bioq_datasets("downsampled_clean_bed", bioq_dir, cfg_file=args.config_file)
     p3_bws = load_bioq_datasets("k562_3p_bw_prefixs", bioq_dir, cfg_file=args.config_file)
-    if gb_cov_tab is None:
+    if k562_gb_cov_tab is None or gm12878_gb_cov_tab is None:
         gb_covs = load_bioq_datasets("genomewide_bin_coverage", bioq_dir, cfg_file=args.config_file)
-        gb_cov_tab = gb_covs["500"]
-
+        k562_gb_cov_tab = gb_covs["K562_500"]
+        gm12878_gb_cov_tab = gb_covs["GM12878_500"]
+    
+    # k562
+    k562_score_bw_dict = {
+        "K562_DHS": nfs_mapping(cor_bws["K562_DHS"]),
+        "K562_H3K27ac": nfs_mapping(cor_bws["K562_H3K27ac"]),
+        "K562_CTCF": nfs_mapping(cor_bws["K562_CTCF"]),
+    }
     main(data_save_to=args.data_save_to, data_prefix=args.data_prefix,
-         bed_files=beds, dsc_beds=dsc_beds, precise_end_bw_files=pe_bws,
+         bam_files={k: v for k, v in ubams.items() if k.startswith("K562_")},
+         bed_files={k: v for k, v in beds.items() if k.startswith("K562_")},
+         local_registry="K562",
+         dsc_beds={k: v for k, v in dsc_beds.items() if k.startswith("K562_")},
+         precise_end_bw_files={k: v for k, v in pe_bws.items() if k.startswith("K562_")},
          segmentations=args.genomic_segmentations, te_bed=args.te_bed, ne_bed=args.ne_bed,
-         promoter_bed=args.bed_promoter, gb_cov_tab=gb_cov_tab, cor_bws=cor_bws,
-         chromosome_size=cfg.get("references", "hg38_chromsize_genome"), abundant_rna=args.abundant_rna,
-         file_5ss=args.bed_5ss, file_3ss=args.bed_3ss)
+         promoter_bed=args.bed_promoter, gb_cov_tab=k562_gb_cov_tab, cor_bws=k562_score_bw_dict,
+         chromosome_size=nfs_mapping(cfg.get("references", "hg38_chromsize_genome")), abundant_rna=args.abundant_rna,
+         file_5ss=args.bed_5ss, file_3ss=args.bed_3ss, width_rate=0.64)
+
+    # gm12878
+    gm12878_score_bw_dict = {
+        "GM12878_DHS": nfs_mapping(cor_bws["GM12878_DHS"]),
+        "GM12878_H3K27ac": nfs_mapping(cor_bws["GM12878_H3K27ac"]),
+        "GM12878_CTCF": nfs_mapping(cor_bws["GM12878_CTCF"]),
+    }
+    main(method=args.method, data_save_to=args.data_save_to, fig_save_to=args.fig_save_to,
+         end_groups=end_groups, name_mapping=official_name_map, data_prefix=args.data_prefix,
+         bam_files={k: v for k, v in ubams.items() if k.startswith("GM12878_")},
+         local_registry="GM12878",
+         bed_files={k: v for k, v in beds.items() if k.startswith("GM12878_")},
+         dsc_beds={k: v for k, v in dsc_beds.items() if k.startswith("GM12878_")},
+         precise_end_bw_files={k: v for k, v in pe_bws.items() if k.startswith("GM12878_")},
+         segmentations=args.genomic_segmentations, te_bed=args.te_bed_supplementary, ne_bed=args.ne_bed_supplementary,
+         promoter_bed=args.bed_promoter, gb_cov_tab=gm12878_gb_cov_tab, cor_bws=gm12878_score_bw_dict,
+         chromosome_size=nfs_mapping(cfg.get("references", "hg38_chromsize_genome")), abundant_rna=args.abundant_rna,
+         file_5ss=args.bed_5ss, file_3ss=args.bed_3ss, width_rate=0.36)

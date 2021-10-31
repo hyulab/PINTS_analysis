@@ -1,0 +1,18 @@
+{
+    "name": "Calculate pause index (HOMER)",
+    "reference": {},
+    "step": [
+        {
+            "hash": "8312adc162dd6365f1159da9787ef7f9",
+            "parameter": "treatment_tags/ {{InputFile:1}} -genome {{GENOME_FA}} -checkGC -fragLength 150 {{TREATMENT_SPEC||}}",
+            "software": "makeTagDirectory",
+            "step_order": 1
+        },
+        {
+            "hash": "3ac550264d49e3d9531e1b6cc9a1d06d",
+            "parameter": "{{GeneDef||rna}} {{GENOME_FA}} -count pausing -strand {{StrandToConsider||+}} -pPromoterStart {{pPromoterStart||-50}} -pPromoterEnd {{pRromoterEnd||200}} -pBodyStart {{pBodyStart||200}} -pBodyEnd {{pBodyEnd||5000}} -d treatment_tags/ > {{JobName}}.txt",
+            "software": "analyzeRepeats.pl",
+            "step_order": 2
+        }
+    ]
+}

@@ -1,0 +1,26 @@
+{
+    "name": "MACS2 without control",
+    "reference": {
+        "WRAPPER_MACS2": ""
+    },
+    "step": [
+        {
+            "hash": "55ff420bc443119c5f5076ac2661ab8a",
+            "parameter": "callpeak -t {{JobName}}.bed.gz -n {{JobName}} -f BED --pvalue {{pval||0.05}} --keep-dup all",
+            "software": "macs2",
+            "step_order": 2
+        },
+        {
+            "hash": "6e144aa097340648fbb1219470f4c7ac",
+            "parameter": "'NF && $1!~/^#/' {{JobName}}_peaks.xls | awk 'BEGIN{FS=\"\\t\";OFS=\"\\t\"}{if (NR>1) print $1,$2,$3,$7}' > {{JobName}}.bed",
+            "software": "awk",
+            "step_order": 3
+        },
+        {
+            "hash": "44edaf4f29e5d84aad2fb04ce1688fa4",
+            "parameter": "{{WRAPPER_MACS2}} {{InputFile}} {{Layout}} {{JobName}}",
+            "software": "bash",
+            "step_order": 1
+        }
+    ]
+}

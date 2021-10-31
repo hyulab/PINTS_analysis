@@ -16,7 +16,7 @@ from pybedtools import BedTool
 from multiprocessing import Pool
 from pyfaidx import Fasta
 from statsmodels.stats.contingency_tables import Table2x2
-from .utils import bed_bed_strand_specific_coverage
+from .utils import bed_bed_strand_specific_coverage, msg_wrapper, nfs_mapping
 
 logging.basicConfig(format="%(name)s - %(asctime)s - %(levelname)s: %(message)s",
                     datefmt="%d-%b-%y",
@@ -44,8 +44,9 @@ BG_3MER_RATES = {'AAA': 112389107, 'AAC': 43364499, 'AAG': 58394303, 'AAT': 7267
 N_BG_3MERS = sum(BG_3MER_RATES.values())
 
 
+@msg_wrapper(logger)
 def bidirectional_coverage_among_ref_regions(bed_files, ref_bed, save_to, global_registry, local_registry,
-                                             detectable_threshold=(5,), n_samples=3, n_threads=16):
+                                             biosample="K562", detectable_threshold=(5,), n_samples=3, n_threads=16):
     """
     Get read coverages among reference regions defined in a bed file
 
@@ -61,6 +62,8 @@ def bidirectional_coverage_among_ref_regions(bed_files, ref_bed, save_to, global
         Global registration for outputs
     local_registry : tuple or list
         Local registrations (order) for outputs
+    biosample : str
+        Only focus on beds derived from corresponding biosamples.
     detectable_threshold : tuple of ints
         Lower bound of read counts among a region to be considered as detected
     n_samples : int
@@ -86,6 +89,9 @@ def bidirectional_coverage_among_ref_regions(bed_files, ref_bed, save_to, global
     else:
         # init counts df
         pos_regions = pd.read_csv(ref_bed, sep="\t", header=None)
+
+        if pos_regions.shape[1] == 3:
+            pos_regions[3] = "."
         pos_regions[4] = "."
         pos_regions[5] = "+"
         distribution_per_rep = []
@@ -95,7 +101,7 @@ def bidirectional_coverage_among_ref_regions(bed_files, ref_bed, save_to, global
             pos_regions_pl_bed = BedTool.from_dataframe(pos_regions)
             for k, sample in bed_files.items():
                 cell_line, exp = k.split("_")
-                if cell_line.startswith("K562"):
+                if cell_line.startswith(biosample):
                     labels.append(exp)
                     args.append((pos_regions_pl_bed, sample % (rep + 1), exp))
 
@@ -107,7 +113,7 @@ def bidirectional_coverage_among_ref_regions(bed_files, ref_bed, save_to, global
         sub_dfs = []
         for threshold in detectable_threshold:
             d_result = pd.DataFrame(0,
-                                    index=[exp.replace("K562_", "") if i == 0 else exp.replace("K562_", "") + f"_{i}"
+                                    index=[exp.replace(f"{biosample}_", "") if i == 0 else exp.replace(f"{biosample}_", "") + f"_{i}"
                                            for i
                                            in range(n_samples) for exp in bed_files],
                                     columns=("Bidirectional", "Unidirectional"))
@@ -144,7 +150,8 @@ def bidirectional_coverage_among_ref_regions(bed_files, ref_bed, save_to, global
     return final_result_file1, final_result_file2
 
 
-def ttseq(bed_files, ttseq_csv, all_assays, save_to, global_registry, local_registries):
+@msg_wrapper(logger)
+def ttseq(bed_files, ttseq_csv, all_assays, save_to, global_registry, local_registries, biosample="K562"):
     """
     Estimate bias toward stable/unstable transcripts
 
@@ -163,6 +170,8 @@ def ttseq(bed_files, ttseq_csv, all_assays, save_to, global_registry, local_regi
         Global registration for outputs
     local_registries : list of str
         Local registration (order) for outputs
+    biosample : str
+        Only focus on beds derived from corresponding biosamples.
 
     Returns
     -------
@@ -186,7 +195,7 @@ def ttseq(bed_files, ttseq_csv, all_assays, save_to, global_registry, local_regi
             # for exp, sample in zip(labels, bed_files):
             for k, sample in bed_files.items():
                 cell_line, exp = k.split("_")
-                if cell_line.startswith("K562"):
+                if cell_line.startswith(biosample):
                     args.append((ttseq_bed, sample % (rep + 1), exp))
             with Pool(n_threads) as pool:
                 rep_result = pool.starmap(bed_bed_strand_specific_coverage, args)
@@ -210,6 +219,7 @@ def ttseq(bed_files, ttseq_csv, all_assays, save_to, global_registry, local_regi
     return final_result_file1, final_result_file2
 
 
+@msg_wrapper(logger)
 def evaluate_ss_control(paired_bams, ref_bed, save_to, global_registry, local_registry):
     """
     Evaluate strand specificity (taking upstream anti-sense transcription into consideration)
@@ -642,8 +652,10 @@ def main(bed_files, bam_files, data_save_to, data_prefix="", **kwargs):
     **kwargs : dict
         se_bed : str
             Path to a bed file, which defines super enhancer elements
-        te_bed : str
-            Path to a bed file, which defines true enhancer elements
+        te_beds : list or tuple
+            Each item is a path to a bed file, which defines true enhancer elements
+        te_bed_labels : list or tuple
+            Items are the names of the corresponding reference sets
         ttseq_csv : str
             Path to a csv file, which defines decay rates estimated from TT-seq
         prime_3_bw_files : dict
@@ -665,7 +677,8 @@ def main(bed_files, bam_files, data_save_to, data_prefix="", **kwargs):
 
     """
     se_bed = kwargs.pop("se_bed")
-    te_bed = kwargs.pop("te_bed")
+    te_beds = kwargs.pop("te_beds")
+    te_bed_labels = kwargs.pop("te_bed_labels")
     ttseq_csv = kwargs.pop("ttseq_csv")
     prime_3_bw_files = kwargs.pop("prime_3_bw_files")
     strands_control_bams = kwargs.pop("strands_control_bams")
@@ -675,7 +688,7 @@ def main(bed_files, bam_files, data_save_to, data_prefix="", **kwargs):
     adapters = kwargs.pop("adapters")
 
     assert se_bed is not None
-    assert te_bed is not None
+    assert te_beds is not None
     assert ttseq_csv is not None
 
     analysis_summaries = {
@@ -691,26 +704,32 @@ def main(bed_files, bam_files, data_save_to, data_prefix="", **kwargs):
     se_coverage, se_pairwise = bidirectional_coverage_among_ref_regions(bed_files=bed_files,
                                                                         ref_bed=se_bed,
                                                                         save_to=data_save_to,
+                                                                        biosample="K562",
                                                                         global_registry=global_registry,
                                                                         local_registry=("SEPercentCoverage",
                                                                                         "SECount"))
     analysis_summaries["se_coverage"].append(se_coverage)
     analysis_summaries["se_pairwise"].append(se_pairwise)
+    
     # te coverage
-    te_coverage, te_pairwise = bidirectional_coverage_among_ref_regions(bed_files=bed_files,
-                                                                        ref_bed=te_bed,
-                                                                        save_to=data_save_to,
-                                                                        global_registry=global_registry,
-                                                                        local_registry=("TEPercentCoverage",
-                                                                                        "TECount"),
-                                                                        detectable_threshold=(1, 3, 5, 10, 15, 20))
+    for i, te_bed_file in enumerate(te_beds):
+            te_coverage, te_pairwise = bidirectional_coverage_among_ref_regions(bed_files=bed_files,
+                                                                                ref_bed=te_bed_file,
+                                                                                biosample="K562",
+                                                                                save_to=data_save_to,
+                                                                                global_registry=global_registry,
+                                                                                local_registry=(
+                                                                                    f"TEPercentCoverage_{te_bed_labels[i]}",
+                                                                                    f"TECount_{te_bed_labels[i]}"),
+                                                                                detectable_threshold=(1, 3, 5, 10, 15, 20))
+
     analysis_summaries["te_coverage"].append(te_coverage)
     analysis_summaries["te_pairwise"].append(te_pairwise)
 
     # decay rate from TTseq
     ttseq_dat_melted, ttseq_dat_raw = ttseq(bed_files=bed_files, ttseq_csv=ttseq_csv,
                                             all_assays=full_assays, save_to=data_save_to,
-                                            global_registry=global_registry,
+                                            global_registry=global_registry, biosample="K562",
                                             local_registries=("DecayRatesMelted", "DecayRates"))
     analysis_summaries["stable_unstable"].append(ttseq_dat_melted)
     analysis_summaries["stable_unstable"].append(ttseq_dat_raw)
@@ -746,13 +765,68 @@ def main(bed_files, bam_files, data_save_to, data_prefix="", **kwargs):
     with open(os.path.join(data_save_to, f"{data_prefix}_summary.json"), "w") as fh:
         json.dump(analysis_summaries, fh)
 
+def supplementary_main(method, bed_files, data_save_to, fig_save_to, end_groups,
+                       name_mapping=None, data_prefix="", **kwargs):
+    """
+
+    Parameters
+    ----------
+    method : str
+        all, plot_figures, generate_data
+    bed_files : list or list-like
+        bed files
+    data_save_to : str
+        generated data will be exported to this path
+    fig_save_to : str
+        figures will be exported to this path
+    end_groups : dict-like
+        Assay: Precise/approximate ends that this assay can report
+    name_mapping : dict
+        Name mapping
+    data_prefix : str
+        All outputs from `generate_data` will have this prefix
+    kwargs
+
+    Returns
+    -------
+
+    """
+    te_bed = kwargs.pop("te_bed")
+    if method != "plot_figures":
+        assert te_bed is not None
+        analysis_summaries = {
+            "te_coverage": [],
+            "te_pairwise": [],
+        }
+        # te coverage
+        te_coverage, te_pairwise = bidirectional_coverage_among_ref_regions(bed_files=bed_files,
+                                                                            ref_bed=te_bed,
+                                                                            save_to=data_save_to,
+                                                                            biosample="GM12878",
+                                                                            global_registry=global_registry,
+                                                                            local_registry=("TEPercentCoverage_S",
+                                                                                            "TECount_S"),
+                                                                            detectable_threshold=(1, 3, 5, 10, 15, 20))
+        analysis_summaries["te_coverage"].append(te_coverage)
+        analysis_summaries["te_pairwise"].append(te_pairwise)
+
+        with open(os.path.join(data_save_to, f"{data_prefix}_summary.json"), "w") as fh:
+            json.dump(analysis_summaries, fh)
+
 
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
     parser.add_argument("--samples", type=int, help="Number of downsamples", default=3)
     parser.add_argument("--data-save-to", required=True, help="Save output data to")
     parser.add_argument("--se-bed", required=False, help="Super enhancers defined in a bed file")
-    parser.add_argument("--te-bed", required=False, help="True enhancers defined in a bed file")
+    parser.add_argument("--te-bed", nargs="*", required=False, help="True enhancers defined in a bed file",
+                        default=(
+                            nfs_mapping("/local/projects/peakcalling/data/criteria/v3_20200614/hglft_Enhancers_K562_1a3f2b86-892c-49ac-a61d-4a33e746028e.bed"),
+                            nfs_mapping("/local/projects/peakcalling/data/criteria/20210715/hglft_Enhancer_K562_3091f504-b31b-4117-9238-e09a0f719117.consensus.STARRseqMPRA.bed"),)
+                        )
+    parser.add_argument("--te-bed-labels", nargs="*", required=False, help="Name of true enhancer sets",
+                        default=("CRISPR", "STARRseqMPRA"))
+    parser.add_argument("--te-bed-supplementary", required=False, help="True enhancers defined in a bed file for other biosamples")
     parser.add_argument("--ttseq-csv", required=False, help="Decay rate from TTseq in a csv file")
     parser.add_argument("--genomic-fasta", required=False,
                         help="Reference sequences")
@@ -767,6 +841,8 @@ if __name__ == "__main__":
 
     assert os.path.exists(args.config_file)
 
+    assert len(args.te_bed) == len(args.te_bed_labels)
+
     if not os.path.exists(args.tmp_dir):
         os.mkdir(args.tmp_dir)
 
@@ -779,25 +855,30 @@ if __name__ == "__main__":
     end_groups = cfg["dataset_precise_ends"]
     cor_bws = cfg["corroborative_bws"]
 
-    global tmp_dir, n_threads, n_samples, global_registry, full_assays, highlight_assays, layouts
+    global tmp_dir, n_threads, n_samples, global_registry, full_assays, highlight_assays, layouts, unified_color_map, unified_color_map_s
     tmp_dir = args.tmp_dir
     pybedtools.set_tempdir(tmp_dir)
     n_threads = int(cfg.get("global", "n_threads"))
     n_samples = int(cfg.get("assays", "n_downsamples"))
     global_registry = args.global_registry
     full_assays = cfg.get("assays", "plot_order_full").split("|")
-    assay_offical_names = cfg.get("assays", "assay_full_names").split("|")
+    assay_official_names = cfg.get("assays", "assay_full_names").split("|")
     highlight_assays = cfg.get("assays", "plot_order_simplified").split("|")
 
     layouts = dict()
     for k, v in cfg["dataset_layouts"].items():
         layouts[k] = v
+    unified_color_map = dict()
     official_name_map = dict()
     plot_order = cfg.get("assays", "plot_order_full").split("|")
     plot_order_simplified = cfg.get("assays", "plot_order_simplified").split("|")
-    
+    plot_color = cfg.get("assays", "plot_colors").split("|")
     for k, v in enumerate(plot_order):
-        official_name_map[v] = assay_offical_names[k]
+        unified_color_map[v] = plot_color[k]
+        official_name_map[v] = assay_official_names[k]
+    unified_color_map_s = dict()
+    for k, v in enumerate(plot_order_simplified):
+        unified_color_map_s[v] = unified_color_map[v]
 
     adapters = dict()
     for k, v in cfg["RT_primer"].items():
@@ -818,21 +899,29 @@ if __name__ == "__main__":
 
     from .utils import load_bioq_datasets, load_bioq_dataset
 
-    p3_bws = load_bioq_datasets("k562_3p_bw_prefixs", bioq_dir, cfg_file=args.config_file)
+    p3_bws = load_bioq_datasets("k562_3p_bw_prefixs", cfg_file=args.config_file)
     known_ss_libraries = (
-        # unstranded, stranded
-        (load_bioq_dataset(cfg.get("auxiliary_alignment_per_rep", "K562_uRNAseq_1_1"), bioq_dir),
-         load_bioq_dataset(cfg.get("unique_alignments_per_rep", "K562_totalRNAseq_1_1"), bioq_dir)),
-        (load_bioq_dataset(cfg.get("auxiliary_alignment_per_rep", "K562_uRNAseq_2_1"), bioq_dir),
-         load_bioq_dataset(cfg.get("unique_alignments_per_rep", "K562_totalRNAseq_2_1"), bioq_dir)),
-        (load_bioq_dataset(cfg.get("auxiliary_alignment_per_rep", "K562_uRNAseq_3_1"), bioq_dir),
-         load_bioq_dataset(cfg.get("unique_alignments_per_rep", "K562_totalRNAseq_3_1"), bioq_dir))
-    )
-    beds = load_bioq_datasets("downsampled_clean_bed", bioq_dir, cfg_file=args.config_file)
-    ubams = load_bioq_datasets("unique_alignments_per_rep", bioq_dir, cfg_file=args.config_file)
+            # unstranded, stranded
+            (nfs_mapping(load_bioq_dataset(cfg.get("auxiliary_alignment_per_rep", "K562_uRNAseq_1_1"))),
+             nfs_mapping(load_bioq_dataset(cfg.get("unique_alignments_per_rep", "K562_totalRNAseq_1_1")))),
+            (nfs_mapping(load_bioq_dataset(cfg.get("auxiliary_alignment_per_rep", "K562_uRNAseq_2_1"))),
+             nfs_mapping(load_bioq_dataset(cfg.get("unique_alignments_per_rep", "K562_totalRNAseq_2_1")))),
+            (nfs_mapping(load_bioq_dataset(cfg.get("auxiliary_alignment_per_rep", "K562_uRNAseq_3_1"))),
+             nfs_mapping(load_bioq_dataset(cfg.get("unique_alignments_per_rep", "K562_totalRNAseq_3_1"))))
+        )
+    beds = load_bioq_datasets("downsampled_clean_bed", cfg_file=args.config_file)
+    ubams = load_bioq_datasets("unique_alignments_per_rep", cfg_file=args.config_file)
 
     main(bed_files=beds, data_save_to=args.data_save_to, 
-         se_bed=args.se_bed, te_bed=args.te_bed, ttseq_csv=args.ttseq_csv,
-         prime_3_bw_files=p3_bws, strands_control_bams=known_ss_libraries, btfz_bed=args.btfz_bed,
-         bam_files=ubams, splicing_junctions=cfg.get("references", "gencode_splicing_junctions"),
-         genome_fasta=args.genomic_fasta, adapters=adapters, data_prefix=args.data_prefix)
+         se_bed=args.se_bed, te_beds=args.te_bed, te_bed_labels=args.te_bed_labels, 
+         ttseq_csv=args.ttseq_csv, prime_3_bw_files=p3_bws, 
+         strands_control_bams=known_ss_libraries, btfz_bed=args.btfz_bed,
+         bam_files=ubams, splicing_junctions=nfs_mapping(cfg.get("references", "gencode_splicing_junctions")),
+         genome_fasta=args.genomic_fasta, adapters=adapters, 
+         data_prefix=args.data_prefix)
+
+    supplementary_main(method=args.method, bed_files=beds, end_groups=end_groups,
+                       data_save_to=args.data_save_to, fig_save_to=args.fig_save_to,
+                       te_bed=args.te_bed_supplementary, name_mapping=official_name_map,
+                       data_prefix=args.data_prefix+"_GM12878")
+                       

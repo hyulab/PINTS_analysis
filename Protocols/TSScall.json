@@ -1,0 +1,36 @@
+{
+    "name": "TSScall",
+    "reference": {},
+    "step": [
+        {
+            "hash": "c20df20239d98b51d73d60957e14df7f",
+            "parameter": "'BEGIN{OFS=\"\\t\";FS=\"\\t\"}{if(NR>1) print $0}' {{JobName}}.bed > {{JobName}}_remove_trackinfo.bed",
+            "software": "awk",
+            "step_order": 3
+        },
+        {
+            "hash": "bb2b57bcb0d188d60552cc40c9f1c715",
+            "parameter": "'BEGIN{OFS=\"\\t\";FS=\"\\t\"}{if(NR>1) print $0}' {{JobName}}.cluster.bed > {{JobName}}_remove_trackinfo.cluster.bed",
+            "software": "awk",
+            "step_order": 4
+        },
+        {
+            "hash": "cfef19c70989317959a69ef2fe58b8ff",
+            "parameter": "/fs/cbsuhy01/storage/ly349/projects/peakcalling/tools/TSScall/preprocessing.sh {{InputFile}} {{Layout}} {{JobName}}",
+            "software": "bash",
+            "step_order": 1
+        },
+        {
+            "hash": "f4cf758bffd8ff00ff9c088388b1ddd2",
+            "parameter": "/fs/cbsuhy01/storage/ly349/projects/peakcalling/tools/TSScall/TSScall.py -a {{GENE_ANNOTATION}} --detail_file {{JobName}}.txt --cluster_bed {{JobName}}.cluster.bed {{JobName}}_TSS_plus.bedGraph {{JobName}}_TSS_minus.bedGraph chrom.size {{JobName}}.bed",
+            "software": "python",
+            "step_order": 2
+        },
+        {
+            "hash": "1a94359cc2554165b2c5e3c6beb01e5c",
+            "parameter": "/fs/cbsuhy01/storage/ly349/projects/peakcalling/remote_debug/helpers/TSScall/TSScall_bidirectional_peaks.py --include-convergent --input {{JobName}}.txt --save-to {{JobName}}_bidirectional.bed",
+            "software": "python",
+            "step_order": 5
+        }
+    ]
+}

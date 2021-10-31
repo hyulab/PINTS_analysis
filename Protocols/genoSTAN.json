@@ -1,0 +1,14 @@
+{
+    "name": "genoSTAN",
+    "reference": {
+        "WrapperGenoSTAN": "Wrapper script for running genoSTAN."
+    },
+    "step": [
+        {
+            "hash": "5b7046f63b7424f29d6ae2078358d37f",
+            "parameter": "--vanilla {{WrapperGenoSTAN}} {{InputFile:1}} {{InputFile:2}} {{JobName}}.bed",
+            "software": "Rscript",
+            "step_order": 1
+        }
+    ]
+}

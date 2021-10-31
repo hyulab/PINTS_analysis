@@ -1,0 +1,27 @@
+{
+    "name": "groHMM",
+    "reference": {
+        "BAM_EXTRACTOR": "Script to extract certain reads from a bam file",
+        "GROHMM_WRAPPER": "Wrapper script for running groHMM."
+    },
+    "step": [
+        {
+            "hash": "4d4e8f186e46878299816fd79b710b8c",
+            "parameter": "{{GROHMM_WRAPPER}} {{JobName}}_SR.bam {{JobName}}",
+            "software": "Rscript",
+            "step_order": 2
+        },
+        {
+            "hash": "be62e0497bece2fdefab7e72c63dcac3",
+            "parameter": "{{JobName}}_SR.bam",
+            "software": "rm",
+            "step_order": 3
+        },
+        {
+            "hash": "ff37b034e7e4f179718c23c5a785f8f5",
+            "parameter": "{{BAM_EXTRACTOR}} -i {{InputFile}} -o {{JobName}}_SR.bam -m {{Layout}}",
+            "software": "python",
+            "step_order": 1
+        }
+    ]
+}

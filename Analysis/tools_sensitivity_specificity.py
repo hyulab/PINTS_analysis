@@ -11,7 +11,7 @@ import pickle
 import pybedtools
 import pyBigWig
 import os
-from file_parser_mem.gtf import parse_gtf
+from cornerstone.file_parser_mem.gtf import parse_gtf
 from copy import deepcopy
 import numpy as np
 import pandas as pd
@@ -20,7 +20,7 @@ from pybedtools import BedTool
 from configparser import ConfigParser
 from collections import defaultdict, namedtuple
 
-bidirectional_coverage_tracks = namedtuple("BidirectionalCoverageTracks", field_names=("pl", "mn"))
+bidirectional_coverage_tracks = namedtuple("BidirectionalCoverageTracks", field_names=("pl", "mn", "digest"))
 
 logging.basicConfig(format='%(name)s - %(asctime)s - %(levelname)s: %(message)s',
                     datefmt='%d-%b-%y %H:%M:%S',
@@ -31,7 +31,7 @@ logging.basicConfig(format='%(name)s - %(asctime)s - %(levelname)s: %(message)s'
 logger = logging.getLogger("PINTS - ToolSensitivityResources")
 
 from .utils_roc import *
-from .utils import run_command, bin_scores, midpoint_generator
+from .utils import run_command, bin_scores, midpoint_generator, get_file_hash, nfs_mapping
 
 
 def _filter_candidate_regions_by_exp(input_bed, pl_covs_npy, mn_covs_npy, save_to, window_coverage_threshold=0,
@@ -43,6 +43,12 @@ def _filter_candidate_regions_by_exp(input_bed, pl_covs_npy, mn_covs_npy, save_t
     ----------
     input_bed : str
             full path of the input bed file
+    pl_covs_npy : dict
+        key: chromosome
+        value: Path to a npy file for pl coverage
+    mn_covs_npy : dict
+        key: chromosome
+        value: Path to a npy file for mn coverage
     save_to : str
             full path of the output file
     window_coverage_threshold : float
@@ -88,6 +94,39 @@ def _filter_candidate_regions_by_exp(input_bed, pl_covs_npy, mn_covs_npy, save_t
 
 def _enhancer_set(raw_enhancers, raw_nonenhancers, bam_plc, bam_mnc, output_dir, output_prefix, condition,
                   gencode_annotation, genome_size, size_threshold=250):
+    """
+    Build the ref set for enhancers
+
+    Parameters
+    ----------
+    raw_enhancers : str
+        Path to the true enhancer set in bed format
+    raw_nonenhancers : str
+        Path to the non-enhancer set in bed format
+    bam_plc : dict
+        Dictionary of per base coverage per chromosome (positive strand)
+    bam_mnc : dict
+        Dictionary of per base coverage per chromosome (negative strand)
+    output_dir : str
+        Save outputs to this directory
+    output_prefix : str
+        Prefix for outputs
+    condition : str
+        Choices: single or bidirectional. Default, bidirectional.
+    gencode_annotation : str
+        Path to GENCODE annotation file (gtf)
+    genome_size : str
+        Path to a tab-separated file, which store the size of each chromosome
+    size_threshold : int
+        Min length a "true" TRE needs to have. Default, 250bp
+
+    Returns
+    -------
+    tp_enhancers : str
+        Path to the compiled ref enhancer file for the assay
+    tn_enhancers : str
+        Path to the compiled non-enhancer file for the assay
+    """
     direction = 1 if condition == "single" else 2
     enhancer_df = pd.read_csv(raw_enhancers, sep="\t", header=None)
     nonenhancer_df = pd.read_csv(raw_nonenhancers, sep="\t", header=None)
@@ -122,7 +161,7 @@ def _enhancer_set(raw_enhancers, raw_nonenhancers, bam_plc, bam_mnc, output_dir,
     logger.info(f"After merging overlapped elements, there are {len(e_ss_merged)} enhancers")
     logger.info(f"After merging overlapped elements, there are {len(ne_ss_merged)} nonenhancers")
 
-    tp_enhancers = os.path.join(output_dir, output_prefix + "_TP_enhancers.bed")
+    tp_enhancers = os.path.join(output_dir, output_prefix + f"_{get_file_hash(raw_enhancers)[:7]}_TP_enhancers.bed")
     e_ss_bed.moveto(tp_enhancers)
 
     ga = parse_gtf(gencode_annotation)
@@ -133,7 +172,7 @@ def _enhancer_set(raw_enhancers, raw_nonenhancers, bam_plc, bam_mnc, output_dir,
 
     # promoter here is defined as TSS +/- 500bp [-500, TSS, +500]
     bed_promoters = bed_transcripts.flank(g=genome_size, l=500, r=0, s=True).slop(g=genome_size, l=0, r=500, s=True)
-    tn_enhancers = os.path.join(output_dir, output_prefix + "_TN_enhancers.bed")
+    tn_enhancers = os.path.join(output_dir, output_prefix + f"_{get_file_hash(raw_nonenhancers)[:7]}_TN_enhancers.bed")
     bed_tn_enhancers = ne_ss_merged.intersect(b=bed_promoters, v=True)
     logger.info(f"{len(bed_tn_enhancers)} of {len(ne_ss_merged)} nonenhancers passed promoter filer")
     bed_tn_enhancers.moveto(tn_enhancers)
@@ -182,7 +221,50 @@ def _filter_by_CAGE(df, pl_cage, mn_cage, inclusion_zone=1000, directioned=0):
 
 
 def _promoter_set(bam_plc, bam_mnc, output_dir, output_prefix, sampling_sizes, condition, sampling_seed,
-                  gencode_annotation, total_RNA, polyA_RNA, CAGE_pl, CAGE_mn, overlapping_gene, fpkm_threshold=1):
+                  gencode_annotation, total_RNA, polyA_RNA, CAGE_pl, CAGE_mn, overlapping_gene, fpkm_threshold=1.):
+    """
+    Build the ref set for promoters
+
+    Parameters
+    ----------
+    bam_plc : dict
+        Dictionary of per base coverage per chromosome (positive strand)
+    bam_mnc : dict
+        Dictionary of per base coverage per chromosome (negative strand)
+    output_dir : str
+        Save outputs to this directory
+    output_prefix : str
+        Prefix for outputs
+    sampling_sizes : int
+        How many promoters should be drawn from the promoter pool.
+    condition : str
+        Choices: single or bidirectional. Default, bidirectional.
+    sampling_seed : int
+        Seed for generating random number and draw samples
+    gencode_annotation : str
+        Path to GENCODE annotation file (gtf)
+    total_RNA : str
+        Path to a csv file, which has two columns:
+            transcript_id
+            fpkm: FPKM values estimated from total RNA-seq
+    polyA_RNA : str
+        Path to a csv file, which has two columns:
+            transcript_id
+            fpkm: FPKM values estimated from poly-A+ RNA-seq
+    CAGE_pl : str
+        Path to a bigwig file, which contains CAGE signals on the forward strand
+    CAGE_mn : str
+        Path to a bigwig file, which contains CAGE signals on the reverse strand
+    overlapping_gene : str
+        Path to a txt file, which defines overlapping genes for Homo sapiens. By default, the list from OverGeneDB.
+    fpkm_threshold : float
+        Only promoters with expression levels (FPKM) higher than this threshold will be considered. Default, 1.
+
+    Returns
+    -------
+    final_fn : str
+
+    """
     direction = 1 if condition == "single" else 2
     gencode = parse_gtf(gencode_annotation)
     gencode["start"] -= 1
@@ -279,7 +361,7 @@ def _generate_contrast_curves_for_ref_sets(assay, corroborative_bws, enhancer_de
     result_df = None
     results = []
     for k, v in corroborative_bws.items():
-        with pyBigWig.open(v) as bw_obj:
+        with pyBigWig.open(nfs_mapping(v)) as bw_obj:
             enhancer_mat, enhancer_m, (enhancer_u, enhancer_l) = bin_scores(regions=tp_enhancers,
                                                                             score_bw=bw_obj)
             promoter_mat, promoter_m, (promoter_u, promoter_l) = bin_scores(regions=tp_promoters,
@@ -313,43 +395,146 @@ def _generate_contrast_curves_for_ref_sets(assay, corroborative_bws, enhancer_de
 
 def _build_assay_specific_true_false_sets(assay, random_seed, pl_cov_bw, mn_cov_bw, output_dir, true_tre_set,
                                           false_tre_set, gencode_annotation, genome_size, total_RNA, polyA_RNA,
-                                          CAGE_pl, CAGE_mn, overlapping_gene, fpkm_threshold=1,
-                                          condition="bidirectional"):
+                                          CAGE_pl, CAGE_mn, overlapping_gene, fpkm_threshold=1.,
+                                          condition="bidirectional", track_sig=""):
+    """
+    Build assay specific true/non-enhancer set
+
+    Parameters
+    ----------
+    assay : str
+        Name of the assay
+    random_seed : int
+        Seed for generating random number
+    pl_cov_bw : str
+        Full path to input bigwig file, plus strand
+    mn_cov_bw : str
+        Full path to input bigwig file, minus strand
+    output_dir : str
+        Save outputs to this directory
+    true_tre_set : str
+        Path to the true enhancer set in bed format
+    false_tre_set : str
+        Path to the non-enhancer set in bed format
+    gencode_annotation : str
+        Path to GENCODE annotation file (gtf)
+    genome_size : str
+        Path to a tab-separated file, which store the size of each chromosome
+    total_RNA : str
+        Path to a csv file, which has two columns:
+            transcript_id
+            fpkm: FPKM values estimated from total RNA-seq
+    polyA_RNA : str
+        Path to a csv file, which has two columns:
+            transcript_id
+            fpkm: FPKM values estimated from poly-A+ RNA-seq
+    CAGE_pl : str
+        Path to a bigwig file, which contains CAGE signals on the forward strand
+    CAGE_mn : str
+        Path to a bigwig file, which contains CAGE signals on the reverse strand
+    overlapping_gene : str
+        Path to a txt file, which defines overlapping genes for Homo sapiens. By default, the list from OverGeneDB.
+    fpkm_threshold : float
+        Only promoters with expression levels (FPKM) higher than this threshold will be considered. Default, 1.
+    condition : str
+        Choices: single or bidirectional. Default, bidirectional.
+
+    Returns
+    -------
+
+    """
     from pints.io_engine import get_coverage_bw
     pl_covs, mn_covs, rc = get_coverage_bw(bw_pl=pl_cov_bw, bw_mn=mn_cov_bw, chromosome_startswith="chr",
                                            output_dir=output_dir, output_prefix=assay)
 
     tpe, tne = _enhancer_set(raw_enhancers=true_tre_set, raw_nonenhancers=false_tre_set, bam_plc=pl_covs,
-                             bam_mnc=mn_covs, output_dir=output_dir, output_prefix=f"{assay}_{condition}",
+                             bam_mnc=mn_covs, output_dir=output_dir, 
+                             output_prefix=f"{assay}_{condition}_{track_sig}",
                              condition=condition, gencode_annotation=gencode_annotation, genome_size=genome_size)
+
     n_tp = 0
     with open(tpe, "r") as fh:
         for _ in fh:
             n_tp += 1
 
-    tpp = _promoter_set(bam_plc=pl_covs, bam_mnc=mn_covs, output_dir=output_dir, output_prefix=f"{assay}_{condition}",
+    tpp = _promoter_set(bam_plc=pl_covs, bam_mnc=mn_covs, output_dir=output_dir, 
+                        output_prefix=f"{assay}_{condition}_{track_sig}_{get_file_hash(true_tre_set)[:7]}",
                         sampling_sizes=n_tp, condition=condition, sampling_seed=random_seed,
                         gencode_annotation=gencode_annotation, total_RNA=total_RNA, polyA_RNA=polyA_RNA,
                         CAGE_pl=CAGE_pl, CAGE_mn=CAGE_mn, overlapping_gene=overlapping_gene,
                         fpkm_threshold=fpkm_threshold)
-
     # merging
+    tek = get_file_hash(true_tre_set)[:7]
+    nek = get_file_hash(false_tre_set)[:7]
     cmd = f"cat {tpe} {tpp} | sort -k1,1 -k2,2n | "
     cmd += "awk 'BEGIN{OFS=\"\t\";FS=\"\t\"}{print $1,$2,$3 }' > "
-    cmd += f"{output_dir}/{assay}_{condition}_positives.bed"
+    cmd += f"{output_dir}/{assay}_{condition}_{track_sig}_{tek}_positives.bed"
     stdout, stderr, rc = run_command(cmd)
     contrast_df = _generate_contrast_curves_for_ref_sets(assay=assay, corroborative_bws=cfg["corroborative_bws"],
                                                          enhancer_def=tpe,
                                                          promoter_def=tpp,
                                                          negative_def=tne,
-                                                         chromosome_size=cfg.get("references", "hg38_chromsize_genome"))
-    contrast_df.to_csv(f"{output_dir}/{assay}_{condition}_contrast.csv")
+                                                         chromosome_size=genome_size)
+    contrast_df.to_csv(f"{output_dir}/{assay}_{condition}_{track_sig}_{tek}_{nek}_contrast.csv")
     assert rc == 0, stderr
 
 
 def generate_rocs(roc_dedicated_jobs, save_to, positive_set, negative_set, gencode_annotation, genome_size,
                   tool_name_mapping, total_RNA, polyA_RNA, CAGE_pl, CAGE_mn, overlapping_gene, local_registry,
                   coverage_tracks, fpkm_threshold=1, element_type="bidirectional", comment=""):
+    """
+    Generate ROCs
+
+    Parameters
+    ----------
+    roc_dedicated_jobs : pd.DataFrame
+        A dataframe stores info about peak calling jobs for ROC profiling.
+    save_to : str
+        Path to write outputs
+    positive_set : str
+        Path to the true enhancer set in bed format
+    negative_set : str
+        Path to the non-enhancer set in bed format
+    gencode_annotation : str
+        Path to GENCODE annotation file (gtf)
+    genome_size : str
+        Path to a tab-separated file, which store the size of each chromosome
+    tool_name_mapping : dict
+        key: conventional name
+        value: official name
+    total_RNA : str
+        Path to a csv file, which has two columns:
+            transcript_id
+            fpkm: FPKM values estimated from total RNA-seq
+    polyA_RNA : str
+        Path to a csv file, which has two columns:
+            transcript_id
+            fpkm: FPKM values estimated from poly-A+ RNA-seq
+    CAGE_pl : str
+        Path to a bigwig file, which contains CAGE signals on the forward strand
+    CAGE_mn : str
+        Path to a bigwig file, which contains CAGE signals on the reverse strand
+    overlapping_gene : str
+        Path to a txt file, which defines overlapping genes for Homo sapiens. By default, the list from OverGeneDB.
+    local_registry : tuple or list
+        Local registrations (order) for outputs
+    coverage_tracks : dict
+        key: name of the assay
+        value: instance of `bidirectional_coverage_tracks`
+            `pl` : Path to a bigwig file storing signals on the forward strand
+            `mn` : Path to a bigwig file storing signals on the reverse strand
+            `digest` : hash digest
+    fpkm_threshold : float
+        Only promoters with expression levels (FPKM) higher than this threshold will be considered. Default, 1.
+    element_type : str
+        Choices: single or bidirectional. Default, bidirectional.
+    comment : str
+        abc
+
+    Returns
+    -------
+
+    """
     final_result_file1 = os.path.join(save_to,
                                       "{global_registry}_{local_registry}.csv".format(global_registry=global_registry,
                                                                                       local_registry=local_registry[0]))
@@ -359,15 +544,19 @@ def generate_rocs(roc_dedicated_jobs, save_to, positive_set, negative_set, genco
     if all([os.path.exists(f) for f in (final_result_file1, final_result_file2)]):
         logger.info(f"Final output files exist, skip...")
     else:
+        logger.info(f"Expected files {final_result_file1} and {final_result_file2} don't exist, running pipeline...")
         pre_merge_sdfs = []
         tf_tre_folder = os.path.join(tmp_dir, "assay_specific_tf_tres")
         if not os.path.exists(tf_tre_folder):
             os.mkdir(tf_tre_folder)
         ref_contrasts = []
         for assay, sdf in roc_dedicated_jobs.groupby(by=["Assay", ]):
-            expected_true_tre_file = os.path.join(tf_tre_folder, f"{assay}_{element_type}_positives.bed")
-            expected_false_tre_file = os.path.join(tf_tre_folder, f"{assay}_{element_type}_TN_enhancers.bed")
-            expected_contrast_file = os.path.join(tf_tre_folder, f"{assay}_{element_type}_contrast.csv")
+            k0 = coverage_tracks[assay].digest  # fingerprint for signal tracks
+            k1 = get_file_hash(positive_set)[:7]  # fingerprint for positive loci
+            expected_true_tre_file = os.path.join(tf_tre_folder, f"{assay}_{element_type}_{k0}_{k1}_positives.bed")
+            k2 = get_file_hash(negative_set)[:7]  # fingerprint for negative loci
+            expected_false_tre_file = os.path.join(tf_tre_folder, f"{assay}_{element_type}_{k0}_{k2}_TN_enhancers.bed")
+            expected_contrast_file = os.path.join(tf_tre_folder, f"{assay}_{element_type}_{k0}_{k1}_{k2}_contrast.csv")
             if not os.path.exists(expected_true_tre_file) or not os.path.exists(
                     expected_false_tre_file) or not os.path.exists(expected_contrast_file):
                 logger.warning(
@@ -382,16 +571,35 @@ def generate_rocs(roc_dedicated_jobs, save_to, positive_set, negative_set, genco
                                                       gencode_annotation=gencode_annotation, genome_size=genome_size,
                                                       total_RNA=total_RNA, polyA_RNA=polyA_RNA, CAGE_pl=CAGE_pl,
                                                       CAGE_mn=CAGE_mn, overlapping_gene=overlapping_gene,
-                                                      fpkm_threshold=fpkm_threshold, condition=element_type)
+                                                      fpkm_threshold=fpkm_threshold, condition=element_type,
+                                                      track_sig=k0)
             ref_contrasts.append(pd.read_csv(expected_contrast_file))
             for nr, row in sdf.iterrows():
                 incode_name = tool_name_mapping[row['Tool']]
                 model = f"Profiler{incode_name}"
                 if model in globals():
-                    if comment != "":
-                        tmp_result_fn = os.path.join(tmp_dir, f"{row['Tool']}_{assay}_{comment}")
+                    k3 = ""  # fingerprint for peaks
+                    if os.path.isfile(row["File"]):
+                        k3 = get_file_hash(row["File"])[:7]
                     else:
-                        tmp_result_fn = os.path.join(tmp_dir, f"{row['Tool']}_{assay}")
+                        target_path = ""
+                        if os.path.exists(row["File"]):
+                            target_path = row["File"]
+                        else:
+                            parent_dir, _ = os.path.split(row["File"])
+                            if os.path.exists(parent_dir):
+                                target_path = parent_dir
+                        if target_path != "":
+                            stdout, stderr, rc = run_command(f"ls -alR --full-time {target_path} | sha1sum")
+                            if rc == 0:
+                                k3 = stdout.split()[0][:7]
+                    if comment != "":
+                        tmp_result_fn = os.path.join(tmp_dir, f"{row['Tool']}_{assay}_{k0}_{k1}_{k2}_{comment}")
+                    else:
+                        tmp_result_fn = os.path.join(tmp_dir, f"{row['Tool']}_{assay}_{k0}_{k1}_{k2}")
+
+                    if k3 != "":
+                        tmp_result_fn += f"_{k3}"
 
                     model_obj = globals()[model](output_prefix=tmp_result_fn,
                                                  positive_set=expected_true_tre_file,
@@ -435,11 +643,22 @@ def generate_rocs(roc_dedicated_jobs, save_to, positive_set, negative_set, genco
 
 def main(roc_calls, data_save_to, true_tres, false_tres, cov_tracks, gencode_annotation,
          genome_size, tool_name_mapping, total_RNA, polyA_RNA, CAGE_pl, CAGE_mn, overlapping_gene,
-         data_prefix=""):
+         local_registry="", data_prefix="", **kwargs):
     analysis_summaries = {
         "roc": [],
         "consumption": [],
     }
+    roc_calls = kwargs.get("roc_calls")  # peak call dict
+    true_tres = kwargs.get("true_tres")  # positive set
+    false_tres = kwargs.get("false_tres")  # negative set
+    cov_tracks = kwargs.get("cov_tracks")  # coverage tracks for generating assay-specific references
+    gencode_annotation = kwargs.get("gencode_annotation")  # gencode annotation in gtf format
+    genome_size = kwargs.get("genome_size")  # chromosome size tab file
+    total_RNA = kwargs.get("total_RNA")  # path to expression level from total RNA-seq
+    polyA_RNA = kwargs.get("polyA_RNA")  # path to expressino level from polyA+ RNA-seq
+    CAGE_pl = kwargs.get("CAGE_pl")  # CAGE + bigwig for promoter selection
+    CAGE_mn = kwargs.get("CAGE_mn")  # CAGE - bigwig for promoter selection
+    overlapping_gene = kwargs.get("overlapping_gene")  # db of overlapping genes
 
     peak_calls_pre_df = []
     for k, v in roc_calls.items():
@@ -455,11 +674,11 @@ def main(roc_calls, data_save_to, true_tres, false_tres, cov_tracks, gencode_ann
 
     rocs, ref_contrast = generate_rocs(roc_dedicated_jobs=hg38_calls, save_to=data_save_to, positive_set=true_tres,
                                         negative_set=false_tres, gencode_annotation=gencode_annotation,
-                                        genome_size=genome_size,
-                                        tool_name_mapping=tool_name_mapping, total_RNA=total_RNA,
-                                        polyA_RNA=polyA_RNA,
+                                        genome_size=genome_size, tool_name_mapping=tool_name_mapping, 
+                                        total_RNA=total_RNA, polyA_RNA=polyA_RNA,
                                         CAGE_pl=CAGE_pl, CAGE_mn=CAGE_mn, overlapping_gene=overlapping_gene,
-                                        local_registry=("ROC", "RefContrast"),
+                                        local_registry=(f"{local_registry}_{data_prefix}_ROC",
+                                                        f"{local_registry}_{data_prefix}_RefContrast"),
                                         coverage_tracks=cov_tracks, fpkm_threshold=1,
                                         element_type="bidirectional", comment="")
     analysis_summaries["roc"].append(rocs)
@@ -500,13 +719,30 @@ if __name__ == "__main__":
     tmp_dir = args.tmp_dir
     pybedtools.set_tempdir(tmp_dir)
     global_registry = args.global_registry
+    full_assays = cfg.get("assays", "plot_order_full").split("|")
+    highlight_assays = cfg.get("assays", "plot_order_simplified").split("|")
+    layouts = dict()
+    for k, v in cfg["dataset_layouts"].items():
+        layouts[k] = v
+    unified_color_map = dict()
     plot_order = cfg.get("tools", "plot_order").split("|")
+    plot_color = cfg.get("tools", "plot_color").split("|")
+    unified_color_map = dict()
+    for k, v in enumerate(plot_order):
+        unified_color_map[v] = plot_color[k]
 
     roc_calls = dict()
+    ds_roc_calls = dict()
+    ds_roc_calls_15m = dict()
+    ds_roc_calls_10m = dict()
     cov_tracks = defaultdict(bidirectional_coverage_tracks)
+    ds_cov_tracks = defaultdict(bidirectional_coverage_tracks)
+    ds_cov_tracks_15m = defaultdict(bidirectional_coverage_tracks)
+    ds_cov_tracks_10m = defaultdict(bidirectional_coverage_tracks)
     tool_name_mapping = dict()
     
     import socket
+    import hashlib
 
     server1_home_dir = "/fs/cbsuhy01/storage/ly349/" if socket.gethostname().find(
         "cbsuhy01") == -1 else "/local/storage/ly349/"
@@ -518,13 +754,58 @@ if __name__ == "__main__":
     # key: cell_line_assay_tool
     # value: server,user,job_id;file_name
     roc_calls = load_bioq_datasets("peak_call_roc_pr", bioq_dir, cfg_file=args.config_file)
+    ds_roc_calls = load_bioq_datasets("peak_calls_ds_19m_roc", bioq_dir, cfg_file=args.config_file)
+    ds_roc_calls_15m = load_bioq_datasets("peak_calls_ds_15m_roc", bioq_dir, cfg_file=args.config_file)
+    ds_roc_calls_10m = load_bioq_datasets("peak_calls_ds_10m_roc", bioq_dir, cfg_file=args.config_file)
+        
     pl_covs = load_bioq_datasets("unique_pl_bigwig_merged", bioq_dir, cfg_file=args.config_file)
     mn_covs = load_bioq_datasets("unique_mn_bigwig_merged", bioq_dir, cfg_file=args.config_file)
     for k, v in pl_covs.items():
         if k in mn_covs:
             cl, assay = k.split("_")
             if cl == "K562":
-                cov_tracks[assay] = bidirectional_coverage_tracks._make((pl_covs[k], mn_covs[k]))
+                cov_tracks[assay] = bidirectional_coverage_tracks._make(
+                        (pl_covs[k], mn_covs[k], hashlib.md5(
+                            f"{get_file_hash(pl_covs[k])}{get_file_hash(mn_covs[k])}".encode("utf-8")).hexdigest()[:7]
+                         )
+                    )
+    
+        dspl_covs = load_bioq_datasets("downsampled_clean_pl_bw", bioq_dir, cfg_file=args.config_file)
+        dsmn_covs = load_bioq_datasets("downsampled_clean_mn_bw", bioq_dir, cfg_file=args.config_file)
+        for k, v in dspl_covs.items():
+            if k in dsmn_covs:
+                cl, assay, dsn = k.split("_")
+                if cl == "K562":
+                    ds_cov_tracks[f"{assay}{dsn}"] = bidirectional_coverage_tracks._make(
+                        (dspl_covs[k], dsmn_covs[k], hashlib.md5(
+                            f"{get_file_hash(dspl_covs[k])}{get_file_hash(dsmn_covs[k])}".encode("utf-8")).hexdigest()[:7]
+                         )
+                    )
+
+        dspl_covs_15m = load_bioq_datasets("downsampled_clean_pl_bw_15m", bioq_dir, cfg_file=args.config_file)
+        dsmn_covs_15m = load_bioq_datasets("downsampled_clean_mn_bw_15m", bioq_dir, cfg_file=args.config_file)
+        for k, v in dspl_covs_15m.items():
+            if k in dsmn_covs_15m:
+                cl, assay, dsn = k.split("_")
+                if cl == "K562":
+                    ds_cov_tracks_15m[f"{assay}{dsn}"] = bidirectional_coverage_tracks._make(
+                        (dspl_covs[k], dsmn_covs[k], hashlib.md5(
+                            f"{get_file_hash(dspl_covs[k])}{get_file_hash(dsmn_covs[k])}".encode("utf-8")).hexdigest()[:7]
+                         )
+                    )
+
+        dspl_covs_10m = load_bioq_datasets("downsampled_clean_pl_bw_10m", bioq_dir, cfg_file=args.config_file)
+        dsmn_covs_10m = load_bioq_datasets("downsampled_clean_mn_bw_10m", bioq_dir, cfg_file=args.config_file)
+        for k, v in dspl_covs_10m.items():
+            if k in dsmn_covs_10m:
+                cl, assay, dsn = k.split("_")
+                if cl == "K562":
+                    ds_cov_tracks_10m[f"{assay}{dsn}"] = bidirectional_coverage_tracks._make(
+                        (dspl_covs[k], dsmn_covs[k],
+                         hashlib.md5(f"{get_file_hash(dspl_covs[k])}{get_file_hash(dsmn_covs[k])}".encode(
+                             "utf-8")).hexdigest()[:7])
+                    )
+
 
     formal_names = cfg.get("tools", "formal_names").split("|")
     compatible_names = cfg.get("tools", "compatible_names").split("|")
@@ -544,6 +825,31 @@ if __name__ == "__main__":
         tool = tool.replace(".", "")
         if not all([v.find(j) != -1 for j in (tool, genome, assay)]):
             logger.error(f"{k} and {v} don't seem to match with each other")
+    for k, v in ds_roc_calls.items():
+        if not os.path.exists(v):
+            logger.error(f"Cannot locate peak calls for {k} {v}")
+        tool, genome, cellline, assay, biorep, techrep = k.split("_")
+        assay = assay[:-1]
+        tool = tool.replace(".", "")
+        if not all([v.find(j) != -1 for j in (tool, genome, assay)]):
+            logger.error(f"{k} and {v} don't seem to match with each other")
+    for k, v in ds_roc_calls_15m.items():
+        if not os.path.exists(v):
+            logger.error(f"Cannot locate peak calls for {k} {v}")
+        tool, genome, cellline, assay, biorep, techrep = k.split("_")
+        assay = assay[:-1]
+        tool = tool.replace(".", "")
+        if not all([v.find(j) != -1 for j in (tool, genome, assay)]):
+            logger.error(f"{k} and {v} don't seem to match with each other")
+    for k, v in ds_roc_calls_10m.items():
+        if not os.path.exists(v):
+            logger.error(f"Cannot locate peak calls for {k} {v}")
+        tool, genome, cellline, assay, biorep, techrep = k.split("_")
+        assay = assay[:-1]
+        tool = tool.replace(".", "")
+        if not all([v.find(j) != -1 for j in (tool, genome, assay)]):
+            logger.error(f"{k} and {v} don't seem to match with each other")
+
     main(method=args.method, roc_calls=roc_calls, data_save_to=args.data_save_to,
          true_tres=cfg.get("references", "true_enhancers"), false_tres=cfg.get("references", "non_enhancers"),
          cov_tracks=cov_tracks, gencode_annotation=cfg.get("references", "gencode_comprehensive_gtf"),
@@ -551,4 +857,62 @@ if __name__ == "__main__":
          total_RNA=cfg.get("references", "K562_expression_totalRNA"),
          polyA_RNA=cfg.get("references", "K562_expression_polyA"), CAGE_pl=cfg.get("references", "K562_CAGE_pl"),
          CAGE_mn=cfg.get("references", "K562_CAGE_mn"), overlapping_gene=cfg.get("references", "hs_overlapping_genes"),
-         data_prefix=args.data_prefix)
+         local_registry="SensRes_ROC", data_prefix=args.data_prefix, 
+         plot_assays=("GROcap", "CoPRO", "csRNAseq", "NETCAGE", "RAMPAGE", "CAGE", "STRIPEseq"))
+
+    # downsampled libs
+    main(method=args.method, roc_calls=ds_roc_calls, data_save_to=args.data_save_to, fig_save_to=args.fig_save_to,
+         true_tres=nfs_mapping(cfg.get("references", "true_enhancers")),
+         false_tres=nfs_mapping(cfg.get("references", "non_enhancers")),
+         cov_tracks=ds_cov_tracks,
+         gencode_annotation=nfs_mapping(cfg.get("references", "gencode_comprehensive_gtf")),
+         genome_size=nfs_mapping(cfg.get("references", "hg38_chromsize_genome")),
+         tool_name_mapping=tool_name_mapping,
+         total_RNA=nfs_mapping(cfg.get("references", "K562_expression_totalRNA")),
+         polyA_RNA=nfs_mapping(cfg.get("references", "K562_expression_polyA")),
+         CAGE_pl=nfs_mapping(cfg.get("references", "K562_CAGE_pl")),
+         CAGE_mn=nfs_mapping(cfg.get("references", "K562_CAGE_mn")),
+         overlapping_gene=nfs_mapping(cfg.get("references", "hs_overlapping_genes")),
+         local_registry="SensRes_DS19M", data_prefix=args.data_prefix+"_DS19M", is_supplement=True,
+         plot_assays=("GROcap1", "GROcap2", "GROcap3", "CoPRO1", "CoPRO2", "CoPRO3",
+                      "csRNAseq1", "csRNAseq2", "csRNAseq3", "NETCAGE1", "NETCAGE2", "NETCAGE3",
+                      "RAMPAGE1", "RAMPAGE2", "RAMPAGE3", "CAGE1", "CAGE2", "CAGE3",
+                      "STRIPEseq1", "STRIPEseq2", "STRIPEseq3")
+         )
+    main(method=args.method, roc_calls=ds_roc_calls_15m, data_save_to=args.data_save_to, fig_save_to=args.fig_save_to,
+         true_tres=nfs_mapping(cfg.get("references", "true_enhancers")),
+         false_tres=nfs_mapping(cfg.get("references", "non_enhancers")),
+         cov_tracks=ds_cov_tracks_15m,
+         gencode_annotation=nfs_mapping(cfg.get("references", "gencode_comprehensive_gtf")),
+         genome_size=nfs_mapping(cfg.get("references", "hg38_chromsize_genome")),
+         tool_name_mapping=tool_name_mapping,
+         total_RNA=nfs_mapping(cfg.get("references", "K562_expression_totalRNA")),
+         polyA_RNA=nfs_mapping(cfg.get("references", "K562_expression_polyA")),
+         CAGE_pl=nfs_mapping(cfg.get("references", "K562_CAGE_pl")),
+         CAGE_mn=nfs_mapping(cfg.get("references", "K562_CAGE_mn")),
+         overlapping_gene=nfs_mapping(cfg.get("references", "hs_overlapping_genes")),
+         local_registry="SensRes_DS15M", data_prefix=args.data_prefix + "_DS15M", is_supplement=True,
+         plot_assays=("GROcap1", "GROcap2", "GROcap3", "CoPRO1", "CoPRO2", "CoPRO3",
+                      "csRNAseq1", "csRNAseq2", "csRNAseq3", "NETCAGE1", "NETCAGE2", "NETCAGE3",
+                      "RAMPAGE1", "RAMPAGE2", "RAMPAGE3", "CAGE1", "CAGE2", "CAGE3",
+                      "STRIPEseq1", "STRIPEseq2", "STRIPEseq3")
+         )
+    main(method=args.method, roc_calls=ds_roc_calls_10m, data_save_to=args.data_save_to, fig_save_to=args.fig_save_to,
+         true_tres=nfs_mapping(cfg.get("references", "true_enhancers")),
+         false_tres=nfs_mapping(cfg.get("references", "non_enhancers")),
+         cov_tracks=ds_cov_tracks_10m,
+         gencode_annotation=nfs_mapping(cfg.get("references", "gencode_comprehensive_gtf")),
+         genome_size=nfs_mapping(cfg.get("references", "hg38_chromsize_genome")),
+         tool_name_mapping=tool_name_mapping,
+         total_RNA=nfs_mapping(cfg.get("references", "K562_expression_totalRNA")),
+         polyA_RNA=nfs_mapping(cfg.get("references", "K562_expression_polyA")),
+         CAGE_pl=nfs_mapping(cfg.get("references", "K562_CAGE_pl")),
+         CAGE_mn=nfs_mapping(cfg.get("references", "K562_CAGE_mn")),
+         overlapping_gene=nfs_mapping(cfg.get("references", "hs_overlapping_genes")),
+         local_registry="SensRes_DS10M", data_prefix=args.data_prefix + "_DS10M", is_supplement=True,
+         plot_assays=("GROcap1", "GROcap2", "GROcap3", "CoPRO1", "CoPRO2", "CoPRO3",
+                      "csRNAseq1", "csRNAseq2", "csRNAseq3", "NETCAGE1", "NETCAGE2", "NETCAGE3",
+                      "RAMPAGE1", "RAMPAGE2", "RAMPAGE3", "CAGE1", "CAGE2", "CAGE3",
+                      "STRIPEseq1", "STRIPEseq2", "STRIPEseq3")
+         )
+

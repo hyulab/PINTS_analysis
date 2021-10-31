@@ -12,7 +12,7 @@ import pybedtools
 from abc import abstractmethod
 from pybedtools import BedTool
 from decimal import Decimal, getcontext
-from .utils import LOGGING_CFG, DependencyError, run_command
+from .utils import LOGGING_CFG, DependencyError, run_command, get_file_hash
 
 _x = LOGGING_CFG.copy()
 _x["handlers"]["file"]["filename"] = "ROC.log"
@@ -443,6 +443,7 @@ class ProfilerHOMERTSS(ROCProfiler):
                                                 negative_set=negative_set, cache_dir=cache_dir,
                                                 sample_points=sample_points, pairing_distance=pairing_distance)
         self.bid_pairs_with_score = dict()
+
     def roc(self, definition="element"):
         return self._pq_roc(definition=definition)
 
@@ -478,8 +479,16 @@ class ProfilerHOMERTSS(ROCProfiler):
             mn_peaks.to_csv(f"{inputs}mn.bed", sep="\t", header=False, index=False)
             index_bed_file(f"{inputs}mn.bed")
         else:
-            raise DependencyError("Peak calls for ROC not found.")
+            raise DependencyError(f"Peak calls for ROC not found {inputs}.")
         max_bidirectional_distance = self._pairing_distance
+
+        signatures = []
+        signatures.append(get_file_hash(self._positive_set)[:7])
+        signatures.append(get_file_hash(self._negative_set)[:7])
+        signatures.append(get_file_hash(pl_file)[:7])
+        signatures.append(get_file_hash(mn_file)[:7])
+        uniq_key = "".join(signatures)
+
         pe_extended_bed = pd.read_csv(self._positive_set, sep="\t", header=None)
         ne_extended_bed = pd.read_csv(self._negative_set, sep="\t", header=None)
         known_regions = pd.concat([pe_extended_bed, ne_extended_bed])
@@ -511,30 +520,50 @@ class ProfilerHOMERTSS(ROCProfiler):
                 logger.warning(f"No peak passed this threshold: {score}")
                 continue
 
-            fn_pl_sig = os.path.join(self._cache_dir, "sig_pl.bed")
-            fn_mn_sig = os.path.join(self._cache_dir, "sig_mn.bed")
+            fn_pl_sig = os.path.join(self._cache_dir, f"{uniq_key}_sig_pl.bed")
+            fn_mn_sig = os.path.join(self._cache_dir, f"{uniq_key}_sig_mn.bed")
             sig_pl_df.to_csv(fn_pl_sig, sep="\t", header=None, index=False)
             sig_mn_df.to_csv(fn_mn_sig, sep="\t", header=None, index=False)
 
             pl_merged_peaks = pd.concat([sig_pl_df, all_mn_peaks_df])
             mn_merged_peaks = pd.concat([sig_mn_df, all_pl_peaks_df])
             pl_np_df = self.naive_pairing(pl_merged_peaks, max_bidirectional_distance)
+            if pl_np_df is not None:
+                pl_np_df.columns = ['chrom_p1', 'start_p1', 'end_p1', 'name_p1', 'score_p1', 'strand_p1',
+                                    'chrom_p2', 'start_p2', 'end_p2', 'name_p2', 'score_p2', 'strand_p2']
+                pl_np_df_with_score = pl_np_df.apply(lambda x: (x.chrom_p1,
+                                                                min(x.start_p1, x.start_p2),
+                                                                max(x.end_p1, x.end_p2),
+                                                                min(x.score_p1, x.score_p2)),
+                                                     axis=1, result_type='expand')
+            else:
+                pl_np_df_with_score = pl_np_df
             mn_np_df = self.naive_pairing(mn_merged_peaks, max_bidirectional_distance)
+            if mn_np_df is not None:
+                mn_np_df.columns = ['chrom_p1', 'start_p1', 'end_p1', 'name_p1', 'score_p1', 'strand_p1',
+                                    'chrom_p2', 'start_p2', 'end_p2', 'name_p2', 'score_p2', 'strand_p2']
+                mn_np_df_with_score = mn_np_df.apply(lambda x: (x.chrom_p1,
+                                                                min(x.start_p1, x.start_p2),
+                                                                max(x.end_p1, x.end_p2),
+                                                                min(x.score_p1, x.score_p2)),
+                                                     axis=1, result_type='expand')
+            else:
+                mn_np_df_with_score = mn_np_df
             merged_bidirectional_file = os.path.join(self._cache_dir,
-                                                     "HOMER_TSS_%s_bidirectional_peaks.bed" % transformed_score)
-            if pl_np_df is not None and mn_np_df is not None:
-                bid_pl = BedTool.from_dataframe(pl_np_df)
-                bid_mn = BedTool.from_dataframe(mn_np_df)
+                                                     f"HOMER_TSS_{transformed_score}_bidirectional_peaks.{uniq_key}.bed")
+            if pl_np_df_with_score is not None and mn_np_df_with_score is not None:
+                bid_pl = BedTool.from_dataframe(pl_np_df_with_score)
+                bid_mn = BedTool.from_dataframe(mn_np_df_with_score)
                 bid = BedTool.cat(*[bid_pl, bid_mn])
                 bid.saveas(merged_bidirectional_file)
 
                 self.bid_pairs_with_score[score] = merged_bidirectional_file
-            elif pl_np_df is not None:
-                bid_pl = BedTool.from_dataframe(pl_np_df)
+            elif pl_np_df_with_score is not None:
+                bid_pl = BedTool.from_dataframe(pl_np_df_with_score)
                 bid_pl.saveas(merged_bidirectional_file)
                 self.bid_pairs_with_score[score] = merged_bidirectional_file
-            elif mn_np_df is not None:
-                bid_mn = BedTool.from_dataframe(mn_np_df)
+            elif mn_np_df_with_score is not None:
+                bid_mn = BedTool.from_dataframe(mn_np_df_with_score)
                 bid_mn.saveas(merged_bidirectional_file)
                 self.bid_pairs_with_score[score] = merged_bidirectional_file
             else:
@@ -678,8 +707,11 @@ class ProfilerPINTS(ROCProfiler):
         # be compatible to old versions of PINTS
         if os.path.exists(pl_file) and os.path.exists(mn_file):
             pass
-        elif os.path.exists(gtf_file):
-            peak_gtf = parse_gtf(gtf_file)
+        elif os.path.exists(gtf_file) or os.path.exists(gtf_file + ".gz"):
+            if os.path.exists(gtf_file):
+                peak_gtf = parse_gtf(gtf_file)
+            else:
+                peak_gtf = parse_gtf(gtf_file + ".gz")
             # peak_gtf.score: qvalue
             # peak_gtf.pval: pvalue
             COMMON_HEADER = ('chromosome', 'start', 'end', 'name', 'padj', 'strand', 'reads',
@@ -700,6 +732,11 @@ class ProfilerPINTS(ROCProfiler):
             index_bed_file(f"{inputs}mn.bed")
         else:
             raise DependencyError("Peak calls for ROC not found.")
+
+        signatures = [get_file_hash(self._positive_set)[:7], get_file_hash(self._negative_set)[:7],
+                      get_file_hash(pl_file)[:7], get_file_hash(mn_file)[:7]]
+        uniq_key = "".join(signatures)
+
         max_bidirectional_distance = self._pairing_distance
         pe_extended_bed = pd.read_csv(self._positive_set, sep="\t", header=None)
         ne_extended_bed = pd.read_csv(self._negative_set, sep="\t", header=None)
@@ -744,14 +781,14 @@ class ProfilerPINTS(ROCProfiler):
                 logger.warning(f"No peak passed this threshold: {real_k}")
                 continue
 
-            fn_pl_sig = os.path.join(self._cache_dir, "sig_pl.bed")
-            fn_mn_sig = os.path.join(self._cache_dir, "sig_mn.bed")
-            fn_pl_div_peak = os.path.join(self._cache_dir, "sig_pl_divergent_peaks.bed")
-            fn_mn_div_peak = os.path.join(self._cache_dir, "sig_mn_divergent_peaks.bed")
-            fn_pl_bid_peak = os.path.join(self._cache_dir, "sig_pl_bidirectional_peaks.bed")
-            fn_mn_bid_peak = os.path.join(self._cache_dir, "sig_mn_bidirectional_peaks.bed")
-            fn_pl_single_peak = os.path.join(self._cache_dir, "sig_pl_singletons.bed")
-            fn_mn_single_peak = os.path.join(self._cache_dir, "sig_mn_singletons.bed")
+            fn_pl_sig = os.path.join(self._cache_dir, f"sig_pl.{uniq_key}.bed")
+            fn_mn_sig = os.path.join(self._cache_dir, f"sig_mn.{uniq_key}.bed")
+            fn_pl_div_peak = os.path.join(self._cache_dir, f"sig_pl_divergent_peaks.{uniq_key}.bed")
+            fn_mn_div_peak = os.path.join(self._cache_dir, f"sig_mn_divergent_peaks.{uniq_key}.bed")
+            fn_pl_bid_peak = os.path.join(self._cache_dir, f"sig_pl_bidirectional_peaks.{uniq_key}.bed")
+            fn_mn_bid_peak = os.path.join(self._cache_dir, f"sig_mn_bidirectional_peaks.{uniq_key}.bed")
+            fn_pl_single_peak = os.path.join(self._cache_dir, f"sig_pl_singletons.{uniq_key}.bed")
+            fn_mn_single_peak = os.path.join(self._cache_dir, f"sig_mn_singletons.{uniq_key}.bed")
             sig_pl_df.to_csv(fn_pl_sig, sep="\t", header=None, index=False)
             sig_mn_df.to_csv(fn_mn_sig, sep="\t", header=None, index=False)
             merge_opposite_peaks(fn_pl_sig, mn_file,
@@ -771,7 +808,8 @@ class ProfilerPINTS(ROCProfiler):
                                  min_len_opposite_peaks=min_len_opposite_peaks,
                                  stringent_only=stringent_pairs_only)
 
-            merged_bidirectional_file = os.path.join(self._cache_dir, "PINTS_%s_bidirectional_peaks.bed" % (1 - score))
+            merged_bidirectional_file = os.path.join(self._cache_dir,
+                                                     "PINTS_%s_bidirectional_peaks.%s.bed" % (1 - score, uniq_key))
             if os.path.exists(merged_bidirectional_file):
                 try:
                     os.remove(merged_bidirectional_file)

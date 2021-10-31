@@ -1,0 +1,36 @@
+{
+    "name": "dREG.HD pipeline",
+    "description": "Peak calling using dREG.HD, it requires two input files: bws for both forward and reverse strand, signals on reverse strand need to be multiplied by -1. It also requires two pre-trained model files (dREG_MODEL and dREG_HD_MODEL). The outputs will have a shared prefix as JobName. In this protocol, preliminary predictions from dREG (run_predict.bsh) will firstly be made, then an additional filtering step can be activated by assigning a value to Threshold, which will only keep dREG predictions with SVR scores higher than the threshold. dREG.HD will be called at the end to fine tune the result.",
+    "step": [
+        {
+            "software": "gzip",
+            "parameter": "{{JobName}}.eval.bed",
+            "hash": "23ba97fab399b9262e18f1916fd15f53",
+            "step_order": 2
+        },
+        {
+            "software": "bash",
+            "parameter": "{{dREG_RUNNER_HD}} {{InputFile:1}} {{InputFile:2}} {{JobName}} {{dREG_MODEL}} 16 {{GPU_ID||1}}",
+            "hash": "dc6b1f5995f26e464b5090cd4340bd20",
+            "step_order": 1
+        },
+        {
+            "software": "bash",
+            "parameter": "{{dREG_WRITE_BED}} {{Threshold||0.8}} . {{JobName}}.eval.bed.gz",
+            "hash": "6cd3e290b028cafe6011fac5db195915",
+            "step_order": 3
+        },
+        {
+            "software": "bash",
+            "parameter": "{{dREGHD_RUNNER}} dREG_env {{JobName}}.eval.bed.gz.bed.gz {{InputFile:1}} {{InputFile:2}} {{dREG_HD_MODEL}} 16 GPU",
+            "hash": "d4641450f5bfe0aefcccd43952943b2a",
+            "step_order": 4
+        }
+    ],
+    "reference": {
+        "dREG_RUNNER_HD": " (/fs/cbsuhy01/storage/ly349/projects/peakcalling/tools/dREG/run_predict.bsh)",
+        "dREG_WRITE_BED": " (/fs/cbsuhy01/storage/ly349/projects/peakcalling/tools/dREG/writeBed.bsh)",
+        "dREGHD_RUNNER": "dREG.HD runner script (/fs/cbsuhy01/storage/ly349/projects/peakcalling/tools/dREG.HD/run_dREG-HD.bsh)",
+        "dREG_HD_MODEL": "The path to the RData file containing the pre-trained dREG-HD SVM model. (/fs/cbsuhy01/storage/ly349/projects/peakcalling/tools/dREG.HD/dREG.HD/inst/extdata/dREG_HD.model.rdata)"
+    }
+}

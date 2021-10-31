@@ -1,0 +1,36 @@
+{
+    "name": "HOMER groseq",
+    "reference": {},
+    "step": [
+        {
+            "hash": "773a6e6b89f3dda096468659734742db",
+            "parameter": "treatment_tags/ {{InputFile}} -genome {{GENOME_FA}} -checkGC {{TREATMENT_SPEC||}}",
+            "software": "makeTagDirectory",
+            "step_order": 1
+        },
+        {
+            "hash": "10378f3dc9318cf101b226f0fb896765",
+            "parameter": "treatment_tags -style groseq -o auto",
+            "software": "findPeaks",
+            "step_order": 2
+        },
+        {
+            "hash": "2351b735429103c2c26a64c511014269",
+            "parameter": "-v ^# treatment_tags/transcripts.txt | grep -v \"U13369\\|chrM\\|Mycoplasma\\|EBV\" | awk 'BEGIN{OFS=\"\\t\";FS=\"\\t\"}{if (index($1, \"_\")==0) print $2,$3,$4,$1,$6,$5}' - > {{JobName}}.bed",
+            "software": "grep",
+            "step_order": 3
+        },
+        {
+            "hash": "93f8c4ef3ab92c61f7062d28b3dba0e5",
+            "parameter": "-rf treatment_tags1",
+            "software": "rm",
+            "step_order": 5
+        },
+        {
+            "hash": "9f789a71b5f11044ed6e3ef3c0b7a878",
+            "parameter": "treatment_tags/transcripts.txt transcripts.txt",
+            "software": "mv",
+            "step_order": 4
+        }
+    ]
+}
