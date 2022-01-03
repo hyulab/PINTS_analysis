@@ -413,7 +413,7 @@ def get_signal_to_noise_ratios(bed_files, save_to, pos_region_file, neg_region_f
         distribution_dict = dict()
         pos_ref_bed = BedTool.from_dataframe(pos_regions)
         neg_ref_bed = BedTool.from_dataframe(neg_regions).intersect(BedTool(promoter_file), v=True)
-        exps = []
+        exps = set()
         for ref, distribution_key in zip((pos_ref_bed, neg_ref_bed), ("te_distribution", "ne_np_distribution")):
             tmp_distributions = []
             for rep in range(n_samples):
@@ -421,7 +421,7 @@ def get_signal_to_noise_ratios(bed_files, save_to, pos_region_file, neg_region_f
 
                 for k, sample in bed_files.items():
                     cell_line, exp = k.split("_")
-                    exps.append(exp)
+                    exps.add(exp)
                     args.append((ref, sample % (rep + 1), exp))
 
                 with Pool(n_threads) as pool:

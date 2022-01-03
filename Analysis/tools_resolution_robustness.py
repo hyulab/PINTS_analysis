@@ -343,8 +343,8 @@ def _calc_reproducibility_ub(raw_hg19, raw_hg38, tools, assay, cell_line, hg19_p
 
         return lifted_files, cached_files
 
-    lifted_hg19, cached_raw_hg19 = _liftover(raw_hg19, chain_file=hg19_to_38_chain_file, mark=19)
-    lifted_hg38, cached_raw_hg38 = _liftover(raw_hg38, chain_file=hg38_to_19_chain_file, mark=38)
+    lifted_hg19, cached_raw_hg19 = _liftover(raw_hg19, chain_file=hg19_to_38_chain_file, mark=38)
+    lifted_hg38, cached_raw_hg38 = _liftover(raw_hg38, chain_file=hg38_to_19_chain_file, mark=19)
 
     hg38_promoter_bed = BedTool(hg38_promoters)
     hg19_promoter_bed = BedTool(hg19_promoters)
